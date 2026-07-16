@@ -1,37 +1,67 @@
 #!/bin/bash
-# Batch process ORB_SLAM3 for episode folders
+# Batch process ORB_SLAM3 for episode folders (host install).
 #
 # Usage:
-#   ./orbslam_batch_local.sh <session_dir> <orb_slam_dir> [skip_existing] [visualization] [--mask-config PATH]
+#   ./orbslam_batch_local.sh <session_dir> <orb_slam_dir> [skip_existing] [visualization] \
+#       [--mask-config PATH] [--jobs N]
+#
+# Flags may appear in any order. --jobs N runs N stereo_kitti episodes concurrently
+# (default 4; 1 = sequential, the original behavior). Each episode runs in its own
+# subshell with its own masked temp dir, so concurrent runs are fully isolated.
 #
 # Examples:
 #   ./orbslam_batch_local.sh /data/20260521_153031-png ~/code/ORB_SLAM3
 #   ./orbslam_batch_local.sh /data/20260521_153031-png ~/code/ORB_SLAM3 true false
-#   ./orbslam_batch_local.sh /data/20260521_153031-png ~/code/ORB_SLAM3 true false --mask-config configs/gripper_mask_sroi_v2_d405.json
+#   ./orbslam_batch_local.sh /data/...-png ~/code/ORB_SLAM3 true false --mask-config configs/gripper_mask_sroi_v2_d405.json
+#   ./orbslam_batch_local.sh /data/...-png ~/code/ORB_SLAM3 false false --mask-config configs/gripper_mask_sroi_v2_d405.json --jobs 8
 
-SESSION_DIR="${1:-}"
-ORB_SLAM_DIR="${2:-}"
-SKIP_EXIST="${3:-true}"
-VISUALIZATION="${4:-false}"
+SESSION_DIR=""
+ORB_SLAM_DIR=""
+SKIP_EXIST="true"
+VISUALIZATION="false"
 MASK_CONFIG=""
-if [ -n "${5:-}" ]; then
-    if [ "$5" != "--mask-config" ] || [ -z "${6:-}" ] || [ -n "${7:-}" ]; then
-        echo "Error: optional mask syntax is --mask-config PATH" >&2
-        exit 1
-    fi
-    MASK_CONFIG="$6"
-fi
+JOBS="4"
+
+_positionals=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mask-config)
+            [ -z "${2:-}" ] && { echo "Error: --mask-config needs a path" >&2; exit 1; }
+            MASK_CONFIG="$2"; shift 2;;
+        --mask-config=*)
+            MASK_CONFIG="${1#--mask-config=}"; shift;;
+        --jobs)
+            [ -z "${2:-}" ] && { echo "Error: --jobs needs a positive integer" >&2; exit 1; }
+            JOBS="$2"; shift 2;;
+        --jobs=*)
+            JOBS="${1#--jobs=}"; shift;;
+        --)
+            shift; while [ $# -gt 0 ]; do _positionals+=("$1"); shift; done;;
+        *)
+            _positionals+=("$1"); shift;;
+    esac
+done
+SESSION_DIR="${_positionals[0]:-}"
+ORB_SLAM_DIR="${_positionals[1]:-}"
+SKIP_EXIST="${_positionals[2]:-true}"
+VISUALIZATION="${_positionals[3]:-false}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/orbslam_mask_helpers.sh"
 
 if [ -z "$SESSION_DIR" ] || [ -z "$ORB_SLAM_DIR" ]; then
-    echo "Usage: $0 <session_dir> <orb_slam_dir> [skip_existing] [visualization] [--mask-config PATH]"
+    echo "Usage: $0 <session_dir> <orb_slam_dir> [skip_existing] [visualization] [--mask-config PATH] [--jobs N]"
     echo "  session_dir:    path containing episode_* folders"
     echo "  orb_slam_dir:   path to ORB_SLAM3 installation"
     echo "  skip_existing:  \"true\" to skip episodes with CameraTrajectory.txt (default: true)"
     echo "  visualization:  \"true\" to enable GUI (default: false)"
     echo "  --mask-config:  optional gripper-mask JSON; omitted means no masking"
+    echo "  --jobs N:       concurrent stereo_kitti episodes (default: 4; 1 = sequential)"
+    exit 1
+fi
+
+if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [ "$JOBS" -lt 1 ]; then
+    echo "Error: --jobs must be a positive integer (got '$JOBS')" >&2
     exit 1
 fi
 
@@ -63,6 +93,7 @@ echo "ORB_SLAM3 dir: $ORB_SLAM_DIR"
 echo "Skip existing: $SKIP_EXIST"
 echo "Visualization: $VISUALIZATION"
 echo "Mask config:   ${SROI_MASK_CONFIG:-none}"
+echo "Jobs:          $JOBS"
 echo ""
 
 EPISODE_FOLDERS=()
@@ -83,47 +114,63 @@ if [ "$TOTAL" -eq 0 ]; then
     exit 1
 fi
 
-SUCCESS=0
-SKIP=0
-ERROR=0
+# Per-episode outcomes are tallied through a temp file with atomic appends (flock). Each
+# episode runs in its own subshell so the mask helper's globals (SROI_MASK_TEMP_DIR,
+# SROI_ORB_INPUT_DIR) stay isolated across concurrent episodes.
+RESULTS_FILE="$(mktemp)"
+LOCK_FILE="$(mktemp)"
+trap 'sroi_cleanup_mask_input; rm -f "$RESULTS_FILE" "$LOCK_FILE"' EXIT
+record_result() { { flock 9; echo "$1" >> "$RESULTS_FILE"; } 9>"$LOCK_FILE"; }
 
-for folder in "${EPISODE_FOLDERS[@]}"; do
-    name=$(basename "$folder")
-    outfile="$folder/CameraTrajectory.txt"
-    idx=$((SUCCESS + SKIP + ERROR + 1))
-
-    echo ""
-    echo "[$idx/$TOTAL] $name"
-
-    if [ "$SKIP_EXIST" = "true" ] && [ -f "$outfile" ]; then
-        echo "  Skipped (already exists)"
-        SKIP=$((SKIP + 1))
-        continue
-    fi
-
+run_episode() {
+    local folder="$1" idx="$2"
+    local name cfg
+    name="$(basename "$folder")"
     cfg="$folder/orb_slam_realsense_d405.yaml"
     if [ ! -f "$cfg" ]; then
-        echo "  Warning: $cfg not found, using default"
+        echo "  Warning ($name): $cfg not found, using default"
         cfg="$ORB_SLAM_DIR/Examples/Stereo/RealSense_D405.yaml"
     fi
-
+    echo "[$idx/$TOTAL] $name (started)"
     if ! sroi_prepare_orb_input "$folder"; then
-        echo "  Error: failed to prepare masked ORB input"
-        ERROR=$((ERROR + 1))
-        continue
+        echo "  Error ($name): failed to prepare masked ORB input"
+        record_result "error"
+        return
     fi
-
     "$STEREO_KITTI" "$VOCAB" "$cfg" "$SROI_ORB_INPUT_DIR" "$VISUALIZATION"
-
     if sroi_collect_trajectory "$folder"; then
-        echo "  Done"
-        SUCCESS=$((SUCCESS + 1))
+        echo "  Done ($name)"
+        record_result "ok"
     else
-        echo "  Error: no CameraTrajectory.txt generated"
-        ERROR=$((ERROR + 1))
+        echo "  Error ($name): no CameraTrajectory.txt generated"
+        record_result "error"
     fi
     sroi_cleanup_mask_input
+}
+
+running=0
+idx=0
+for folder in "${EPISODE_FOLDERS[@]}"; do
+    name="$(basename "$folder")"
+    if [ "$SKIP_EXIST" = "true" ] && [ -f "$folder/CameraTrajectory.txt" ]; then
+        idx=$((idx + 1))
+        echo "[$idx/$TOTAL] $name (skipped: exists)"
+        record_result "skip"
+        continue
+    fi
+    idx=$((idx + 1))
+    ( run_episode "$folder" "$idx" ) &
+    running=$((running + 1))
+    if (( running >= JOBS )); then
+        wait -n
+        running=$((running - 1))
+    fi
 done
+wait
+
+SUCCESS=$(grep -c '^ok$' "$RESULTS_FILE")
+SKIP=$(grep -c '^skip$' "$RESULTS_FILE")
+ERROR=$(grep -c '^error$' "$RESULTS_FILE")
 
 echo ""
 echo "============================================"
