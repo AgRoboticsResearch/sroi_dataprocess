@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import csv
+import json
 import logging
 import numpy as np
 import os
@@ -22,6 +23,58 @@ from PIL import Image
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.rotation import Rotation
+
+
+GRIPPER_NORMALIZATION_MANIFEST = "gripper_normalization.json"
+
+
+def _copy_gripper_normalization(
+    episode_path: Path,
+    dataset_root: Path,
+    episode_key: str,
+) -> dict | None:
+    """Copy one episode's normalization manifest into LeRobot metadata."""
+    source = episode_path / GRIPPER_NORMALIZATION_MANIFEST
+    if not source.exists():
+        return None
+    with source.open() as f:
+        payload = json.load(f)
+    destination_dir = dataset_root / "meta" / "gripper_normalization"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination_dir / f"{episode_key}.json")
+    return payload
+
+
+def _write_gripper_normalization_summary(
+    dataset_root: Path,
+    records: list[tuple[str, dict]],
+    missing: list[str],
+) -> Path:
+    """Write a dataset-level index, grouping episodes by parameter set."""
+    grouped: dict[str, dict] = {}
+    for episode_label, manifest in records:
+        key = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        group = grouped.setdefault(
+            key,
+            {"parameters": manifest, "episodes": []},
+        )
+        group["episodes"].append(episode_label)
+
+    summary = {
+        "schema_version": 1,
+        "manifest_name_in_source_episodes": GRIPPER_NORMALIZATION_MANIFEST,
+        "normalization_set_count": len(grouped),
+        "normalization_sets": list(grouped.values()),
+        "episodes_missing_manifest": missing,
+    }
+    destination = dataset_root / "meta" / GRIPPER_NORMALIZATION_MANIFEST
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    with temporary.open("w") as f:
+        json.dump(summary, f, indent=2)
+        f.write("\n")
+    os.replace(temporary, destination)
+    return destination
 
 
 def _load_qc_csv(qc_csv: str | Path) -> dict[str, dict[str, str]]:
@@ -289,6 +342,9 @@ def create_lerobot_dataset(
         image_writer_processes=1 ,
     )
 
+    normalization_records: list[tuple[str, dict]] = []
+    normalization_missing: list[str] = []
+
     # Process each episode
     for ep_idx, (session_name, ep_path) in enumerate(candidates):
         label = f"{session_name}/{ep_path.name}" if is_multi_session else ep_path.name
@@ -367,6 +423,14 @@ def create_lerobot_dataset(
         dataset.save_episode()
         print(f"Episode {label} saved")
 
+        norm_key = f"{session_name}__{ep_path.name}" if is_multi_session else ep_path.name
+        norm_manifest = _copy_gripper_normalization(ep_path, dataset.root, norm_key)
+        if norm_manifest is None:
+            normalization_missing.append(label)
+            print(f"Warning: no {GRIPPER_NORMALIZATION_MANIFEST} for {label}")
+        else:
+            normalization_records.append((label, norm_manifest))
+
         # Copy camera info files. Namespace by session in multi-session mode so
         # episode_001 from session A doesn't clobber episode_001 from session B.
         camera_info_files = sorted(ep_path.glob("camera_info_*.json"))
@@ -380,6 +444,10 @@ def create_lerobot_dataset(
 
     print(f"\nDataset created with {dataset.num_episodes} episode(s)")
     print(f"Dataset features: {list(dataset.features.keys())}")
+    summary_path = _write_gripper_normalization_summary(
+        dataset.root, normalization_records, normalization_missing
+    )
+    print(f"Gripper normalization metadata: {summary_path}")
 
     dataset.finalize()
 

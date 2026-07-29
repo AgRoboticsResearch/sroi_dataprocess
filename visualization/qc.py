@@ -46,12 +46,13 @@ API usage:
     load_filters(Path("/path/to/custom.json"))  # before scan_sessions
 
 Categories (per episode):
-    ok                 - non-static motion + valid gripper signal
-    static             - < 1 cm trajectory path
-    flat_gripper       - motion present, gripper std < 0.05 (no actuation)
-    no_gripper         - gripper_distances.txt missing or empty
-    no_traj            - trajectory file missing/empty
-    all_nan_gripper    - all gripper values are NaN
+    ok                  - non-static motion + valid gripper signal, closed at end
+    static              - trajectory path below the configured threshold
+    flat_gripper        - motion present, gripper signal has no actuation
+    gripper_not_closed  - mean of final finite readings is above the threshold
+    no_gripper          - gripper_distances.txt missing or empty
+    no_traj             - trajectory file missing/empty or too short
+    all_nan_gripper     - all gripper values are NaN
 """
 
 from __future__ import annotations
@@ -87,6 +88,8 @@ FLAT_GRIPPER_STD: float = 0.0
 MIN_TRAJ_FRAMES: int = 2
 EXTENT_PADDING_RATIO: float = 0.05
 EXTENT_PADDING_MIN_CM: float = 0.5
+GRIPPER_END_OPEN_THRESHOLD: float = 0.2
+GRIPPER_END_TAIL: int = 10
 CATEGORY_COLORS: dict[str, str] = {}
 CATEGORY_DEFAULT_COLOR: str = "#999999"
 PROBLEM_CATEGORIES: set[str] = set()
@@ -118,6 +121,7 @@ def load_filters(path: Path | None = None) -> None:
     """
     global STATIC_PATH_M, FLAT_GRIPPER_STD, MIN_TRAJ_FRAMES
     global EXTENT_PADDING_RATIO, EXTENT_PADDING_MIN_CM
+    global GRIPPER_END_OPEN_THRESHOLD, GRIPPER_END_TAIL
     global CATEGORY_COLORS, CATEGORY_DEFAULT_COLOR, PROBLEM_CATEGORIES, CATEGORY_SORT_ORDER
     global TRAJ_COLOR, GRIP_COLOR, PANEL_BG, GRIPPER_YLIM
     global EPISODES_PER_ROW, FIGSIZE_SESSION, FIGSIZE_SUMMARY, FIGSIZE_SUMMARY_BASE_HEIGHT
@@ -139,6 +143,10 @@ def load_filters(path: Path | None = None) -> None:
     MIN_TRAJ_FRAMES = int(t.get("min_traj_frames", 2))
     EXTENT_PADDING_RATIO = float(t.get("extent_padding_ratio", 0.05))
     EXTENT_PADDING_MIN_CM = float(t.get("extent_padding_min_cm", 0.5))
+    GRIPPER_END_OPEN_THRESHOLD = float(t.get("gripper_end_open_threshold", 0.2))
+    GRIPPER_END_TAIL = int(t.get("gripper_end_tail", 10))
+    if GRIPPER_END_TAIL < 1:
+        raise ValueError("thresholds.gripper_end_tail must be at least 1")
 
     cats = {k: v for k, v in cfg["categories"].items() if isinstance(v, dict)}
     CATEGORY_COLORS = {k: v["color"] for k, v in cats.items()}
@@ -187,6 +195,7 @@ class EpisodeQC:
     n_nan_gripper: int = 0
     gripper_std: float = 0.0
     gripper_range: float = 0.0
+    gripper_end: float | None = None
     # Raw arrays (only kept if keep_arrays=True on scan)
     pos: np.ndarray | None = field(default=None, repr=False)
     grip: np.ndarray | None = field(default=None, repr=False)
@@ -225,6 +234,21 @@ def _load_gripper(grip_path: Path) -> np.ndarray | None:
     return np.atleast_1d(v)
 
 
+def _gripper_end_value(grip: np.ndarray | None) -> float | None:
+    """Mean of the last GRIPPER_END_TAIL finite gripper readings, or None.
+
+    Convention: 0 = closed, 1 = open. Trailing NaN frames (e.g. the tag occluded
+    once the fruit is in the gripper) are skipped by masking to finite values.
+    """
+    if grip is None:
+        return None
+    finite = grip[np.isfinite(grip)]
+    if len(finite) == 0:
+        return None
+    tail = finite[-GRIPPER_END_TAIL:]
+    return float(tail.mean())
+
+
 def _path_length(pos: np.ndarray | None) -> float:
     if pos is None or len(pos) < 2:
         return 0.0
@@ -243,6 +267,9 @@ def classify(pos: np.ndarray | None, grip: np.ndarray | None) -> str:
         return "all_nan_gripper"
     if finite.std() < FLAT_GRIPPER_STD:
         return "flat_gripper"
+    end = _gripper_end_value(grip)
+    if end is not None and end > GRIPPER_END_OPEN_THRESHOLD:
+        return "gripper_not_closed"
     return "ok"
 
 
@@ -269,6 +296,7 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
         if len(finite):
             e.gripper_std = float(finite.std())
             e.gripper_range = float(finite.max() - finite.min())
+            e.gripper_end = _gripper_end_value(grip)
     if keep_arrays:
         e.pos = pos
         e.grip = grip
@@ -296,7 +324,7 @@ def scan_sessions(root: Path, pattern: str = "*-png", keep_arrays: bool = True) 
 CSV_FIELDS = ["session", "episode", "category",
               "path_length_cm", "xy_span_cm", "z_span_cm", "n_traj_frames",
               "n_nan_gripper", "n_grip_frames", "gripper_std", "gripper_range",
-              "path"]
+              "gripper_end", "path"]
 
 
 def write_csv(session_data: dict[str, list[EpisodeQC]], output: Path) -> None:

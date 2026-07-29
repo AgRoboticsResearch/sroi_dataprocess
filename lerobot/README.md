@@ -19,7 +19,8 @@ The converter reads end-effector poses, gripper distances and per-frame camera i
 # 1. Single episode
 episode_001/
 ├── CameraTrajectoryTransformed.txt   # timestamps + 3x4 transform per frame
-├── gripper_distances.txt             # one gripper measurement per line
+├── gripper_distances.txt             # one normalized gripper measurement per line
+├── gripper_normalization.json        # exact min/max, convention, source, detector settings
 ├── color_000000.png                  # camera images (color_*.png or color_*.jpg)
 └── ...
 
@@ -167,9 +168,12 @@ Notes:
 1. Load `CameraTrajectoryTransformed.txt` and parse the per-frame 3x4 transforms.
 2. Convert each 3x4 into a 4x4 pose matrix and extract translation (`ee.x, ee.y, ee.z`) and rotation as a rotation-vector (`ee.wx, ee.wy, ee.wz`).
 3. Read `gripper_distances.txt` and align length with poses and images.
-4. Load `color_*.png` images, convert to CHW and write them as video frames into the LeRobot dataset.
-5. For each frame, create `observation.state` from the current pose+gripper and `action` from the next frame's pose+gripper (last frame repeats the final pose).
-6. Save the episode (Parquet + video files) and optionally push to the hub.
+4. Copy each episode's `gripper_normalization.json` into
+   `meta/gripper_normalization/` and write a dataset-level
+   `meta/gripper_normalization.json` grouped by distinct parameter set.
+5. Load `color_*.png` images, convert to CHW and write them as video frames into the LeRobot dataset.
+6. For each frame, create `observation.state` from the current pose+gripper and `action` from the next frame's pose+gripper (last frame repeats the final pose).
+7. Save the episode (Parquet + video files) and optionally push to the hub.
 
 ## Error handling & validation
 

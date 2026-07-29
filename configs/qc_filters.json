@@ -1,6 +1,6 @@
 {
   "_doc": "Filter rules for visualization/qc.py — the single source of truth for thresholds, category metadata, colors, and page layout. qc.py loads this at startup; edit values here instead of editing the script. Pass --filters <path> to override per-run.",
-  "version": 2,
+  "version": 3,
 
   "thresholds": {
     "_doc": "Numeric cutoffs used by classify() and the extent computation.",
@@ -8,7 +8,9 @@
     "flat_gripper_std": 0.05,
     "min_traj_frames": 30,
     "extent_padding_ratio": 0.05,
-    "extent_padding_min_cm": 0.5
+    "extent_padding_min_cm": 0.5,
+    "gripper_end_open_threshold": 0.2,
+    "gripper_end_tail": 10
   },
 
   "categories": {
@@ -49,10 +51,17 @@
       "rule": "motion present AND finite gripper_std < thresholds.flat_gripper_std",
       "description": "Camera moved but gripper signal has no actuation"
     },
+    "gripper_not_closed": {
+      "color": "#6a1b9a",
+      "problem": true,
+      "priority": 5,
+      "rule": "motion + actuated gripper AND mean of last thresholds.gripper_end_tail finite readings > thresholds.gripper_end_open_threshold",
+      "description": "Gripper still open at the end — grasp not completed (0=closed, 1=open)"
+    },
     "ok": {
       "color": "#2e7d32",
       "problem": false,
-      "priority": 5,
+      "priority": 6,
       "rule": "otherwise (default branch)",
       "description": "Non-static motion + valid gripper signal"
     }

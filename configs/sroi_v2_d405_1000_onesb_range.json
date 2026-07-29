@@ -1,0 +1,13 @@
+{
+  "description": "SROI v2 D405 using gripper range recovered from 1000-onesb-lab-picking-pngs",
+  "gripper_roi": 395,
+  "gripper_roi_bottom": 450,
+  "tag_family": "tag16h5",
+  "left_gripper_tag_id": 0,
+  "right_gripper_tag_id": 15,
+  "nominal_diag_distance": 41,
+  "threshold": 9,
+  "gripper_min_distance": 84.0789,
+  "gripper_max_distance": 261.7803,
+  "gripper_range_source": "/mnt/data1/sroi/sroi_v2/sroiv2_strawberry_picking_lab/1000-onesb-lab-picking-pngs"
+}

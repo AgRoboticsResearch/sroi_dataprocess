@@ -33,45 +33,78 @@ Session folders are named `{timestamp}-{format}` (e.g. `20260520_143052-mp4`).
 
 ### Step 2: Decode MP4 (only if recorded with --encode-video)
 
+For MP4 recordings, PNG frames are regenerated here. To keep the raw MP4 store
+pristine, decode into a **separate PNG root** (one wipeable tree) instead of
+`-png` siblings next to the `-mp4` folders:
+
 ```bash
-python decode_videos.py ~/Desktop/435/20260520_143052-mp4 --recursive
+# Recommended: decode a whole recording day into <day>/_png/<ts>-png/...
+# (raw *-mp4 folders are never modified; PNGs are regenerable from them)
+batches/decode_batch.sh ~/Desktop/435/20260520_143052
+# Custom root + parallelism:
+batches/decode_batch.sh ~/Desktop/435/20260520_143052 /tmp/pngout --jobs 8
+# Single session also works:
+batches/decode_batch.sh ~/Desktop/435/20260520_143052/20260520_143052-mp4
 ```
 
-Produces a sibling folder with `-png` postfix containing PNG images for ORB-SLAM.
+Then run ORB-SLAM3 / transform / gripper / QC (Steps 3–6) against the PNG root
+(e.g. `~/Desktop/435/20260520_143052/_png`).
+
+Direct `decode_videos.py` still works for one-off or custom roots:
+
+```bash
+# Legacy/convenience behavior: creates a sibling -png folder
+python decode_videos.py ~/Desktop/435/20260520_143052-mp4 --recursive
+# Custom root
+python decode_videos.py ~/Desktop/435/20260520_143052-mp4 --recursive -o /path/to/png_root
+```
 
 ### Step 3: Run ORB-SLAM3
 
 Note: The ORB-SLAM YAML is generated automatically during recording for both D405 (fixed calibration) and D435i (from live calibration).
 
+**Masked SLAM is the standard pipeline for SROI v2.** The gripper/fingers are masked out
+of the stereo frames before tracking so the camera trajectory does not include the moving
+gripper — this is what the LeRobot datasets are built from. Always pass `--mask-config`
+unless you have a specific reason not to.
+
 ```bash
-# Single episode
+# Single episode (unmasked, manual)
 cd ~/code/ORB_SLAM3
 ./Examples/Stereo/stereo_kitti Vocabulary/ORBvoc.txt \
     ~/Desktop/435/20260520_143052-png/episode_001/orb_slam_realsense_d405.yaml \
     ~/Desktop/435/20260520_143052-png/episode_001 false
 
-# Batch all episodes (unchanged behavior: no mask)
-./batches/orbslam_batch_d405.sh ~/Desktop/435/20260520_143052-png
+# STANDARD: batch all episodes WITH the gripper mask (host install)
+batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM3 \
+    true false --mask-config configs/gripper_mask_sroi_v2_d405.json
 
-# Opt in to a rig-specific gripper mask before ORB-SLAM
+# Same masked run, but parallelize N episodes at once (default 4; speeds up large sessions)
+batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM3 \
+    true false --mask-config configs/gripper_mask_sroi_v2_d405.json --jobs 8
+
+# Inside the ORB_SLAM3 Docker container (masked)
 ./batches/orbslam_batch_d405.sh ~/Desktop/435/20260520_143052-png true false \
     --mask-config /codes/sroi_rosbag_utilities/configs/gripper_mask_sroi_v2_d405.json
 
-# Host install with the same optional mask
-batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM3 \
-    true false --mask-config configs/gripper_mask_sroi_v2_d405.json
+# Unmasked run (NOT what the datasets use — legacy/ablation only)
+batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM3
 ```
 
 When `--mask-config` is provided, the batch creates a temporary masked copy of each
 episode's stereo frames, runs ORB-SLAM3 on that copy, saves `CameraTrajectory.txt` back
-to the original episode, and removes the temporary images. Original recordings are
-never modified. Omitting the option preserves the previous unmasked behavior.
+to the original episode, and removes the temporary images. Each episode runs in its own
+subshell with its own masked temp dir, so `--jobs N` concurrent runs are fully isolated
+and the original recordings are never modified. Omitting `--mask-config` preserves the
+previous unmasked behavior.
 
 Mask JSON files define the expected image size, per-eye polygons, and an optional
-full-width `black_below_row`. Use a different config for a different gripper/camera
-assembly; `configs/gripper_mask_sroi_v2_d405.json` contains the current 640x480 D405
-geometry. See [`doc/rig_configs.md`](doc/rig_configs.md) for the schema,
-validation rules, temporary-file behavior, and instructions for adding another rig.
+full-width `black_below_row`. The mask affects only the stereo trajectory; the
+color-based AprilTag gripper signal (Step 5) is never masked. Use a different config for
+a different gripper/camera assembly; `configs/gripper_mask_sroi_v2_d405.json` contains
+the current 640x480 D405 geometry. See [`doc/rig_configs.md`](doc/rig_configs.md) for the
+schema, validation rules, temporary-file behavior, and instructions for adding another
+rig.
 
 ### Step 4: Transform Trajectory
 
@@ -105,6 +138,12 @@ instead of auto-detecting it, add `"gripper_min_distance"` / `"gripper_max_dista
 Each run also writes `gripper_distance_distribution.png` next to the input path — a
 histogram of the pooled raw distances with the selected min/max marked, so you can
 sanity-check the range before trusting the normalized `gripper_distances.txt` files.
+
+Every successfully processed episode also stores `gripper_normalization.json` beside
+`gripper_distances.txt`, and the run root receives the same manifest. It records the
+exact min/max pixels, `0 = closed` / `1 = open` convention, formula, manual-vs-auto
+range source (including a reference dataset when configured), detector settings,
+median filter, and run scope. Keep this manifest with the processed data.
 
 Add `--median_filter 3` (must be odd) to smooth single-frame AprilTag detection noise
 in the raw distances before the min/max is computed and episodes are normalized.
@@ -145,6 +184,11 @@ converting all sessions into one LeRobot dataset:
 # Writes /path/to/day/qc.csv and /path/to/day/qc.pdf
 python visualization/qc.py /path/to/day -o /path/to/day/qc
 ```
+
+Gripper values use `0 = closed` and `1 = open`. QC assigns
+`gripper_not_closed` when the mean of the final 10 finite gripper readings is
+above `0.2`; tune `gripper_end_tail` and `gripper_end_open_threshold` in
+`configs/qc_filters.json` (or a file passed with `--filters`).
 
 The per-episode QC page (default "rich" view) shows three panels per episode,
 mirroring the side-by-side trajectory videos: the RGB frame with the projected

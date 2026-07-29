@@ -16,6 +16,9 @@ both must be present to take effect.
 Every run also saves gripper_distance_distribution.png next to the input
 path: a histogram of the pooled raw (pre-normalization) distances with the
 selected min/max marked, for a quick sanity check of the chosen range.
+It also writes gripper_normalization.json at the run root and beside every
+gripper_distances.txt so normalization parameters and their source remain
+attached to processed data.
 
 Use --median_filter (odd window size, e.g. 3) to smooth per-frame AprilTag
 detection noise in the raw distances before min/max is computed and the
@@ -40,6 +43,13 @@ from scipy.signal import medfilt
 
 import numpy as np
 from pathlib import Path
+
+from gripper_normalization import (
+    ROBUST_EXTREMUM_MIN_SAMPLES,
+    ROBUST_EXTREMUM_THRESHOLD,
+    build_manifest,
+    write_manifest,
+)
 
 # Default config path relative to this script
 DEFAULT_CONFIG = "configs/sroi_v2_d405.json"
@@ -434,8 +444,10 @@ def detect_raw_distances(data_folder, cfg, at_detector, verbose=False, median_fi
     return raw
 
 
-def normalize_and_save(data_folder, raw_distances, min_distance, max_distance):
-    """Scale raw distances to [0, 1] with a shared min/max and write outputs."""
+def normalize_and_save(
+    data_folder, raw_distances, min_distance, max_distance, normalization_manifest
+):
+    """Scale raw distances to [0, 1] and write outputs plus provenance."""
     if not data_folder.endswith('/'):
         data_folder += '/'
 
@@ -445,6 +457,8 @@ def normalize_and_save(data_folder, raw_distances, min_distance, max_distance):
 
     np.savetxt(data_folder + "gripper_distances.txt", gripper_distances_normalized)
     print("Finished processing gripper distances to file", data_folder + "gripper_distances.txt")
+    manifest_path = write_manifest(data_folder, normalization_manifest)
+    print("Saved gripper normalization manifest to", manifest_path)
 
     save_gripper_distance_plot(gripper_distances_normalized, data_folder)
 
@@ -496,19 +510,40 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
     manual_max = cfg.get("gripper_max_distance")
     if manual_min is not None and manual_max is not None:
         min_distance, max_distance = manual_min, manual_max
+        source_type = "manual_config"
         print(f"\nUsing manual gripper range from config: min={min_distance}, max={max_distance}")
     else:
-        max_distance, min_distance = find_distances_max_min(pooled, threshold=0.05, threshold_num=10)
+        source_type = "pooled_robust_extrema"
+        max_distance, min_distance = find_distances_max_min(
+            pooled,
+            threshold=ROBUST_EXTREMUM_THRESHOLD,
+            threshold_num=ROBUST_EXTREMUM_MIN_SAMPLES,
+        )
         print(
             f"\nComputed gripper range from {len(raw_by_folder)} episode(s): "
             f"min={min_distance}, max={max_distance}"
         )
 
+    normalization_manifest = build_manifest(
+        min_distance=min_distance,
+        max_distance=max_distance,
+        source_type=source_type,
+        config_path=config_path,
+        config=cfg,
+        median_filter_size=median_filter_size,
+        episode_count=len(raw_by_folder),
+        frame_count=len(pooled),
+    )
+
     if dist_plot_path is not None:
         save_gripper_range_plot(pooled, min_distance, max_distance, dist_plot_path)
+        manifest_path = write_manifest(Path(dist_plot_path).parent, normalization_manifest)
+        print("Saved run-level gripper normalization manifest to", manifest_path)
 
     for data_folder, raw in raw_by_folder.items():
-        normalize_and_save(data_folder, raw, min_distance, max_distance)
+        normalize_and_save(
+            data_folder, raw, min_distance, max_distance, normalization_manifest
+        )
 
 
 if __name__ == "__main__":

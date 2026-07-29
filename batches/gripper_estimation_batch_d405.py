@@ -11,10 +11,15 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import cv2 as cv
 import matplotlib
@@ -27,6 +32,14 @@ from tqdm import tqdm
 from scipy.signal import medfilt
 
 import numpy as np
+
+from gripper_normalization import (
+    MANIFEST_NAME,
+    ROBUST_EXTREMUM_MIN_SAMPLES,
+    ROBUST_EXTREMUM_THRESHOLD,
+    build_manifest,
+    write_manifest,
+)
 
 
 def check_tag_valid(tag, nominal_diag_distance=50, threshold=10):
@@ -161,7 +174,8 @@ def detect_folder(data_folder: Path, at_detector, args) -> dict:
 
     # Check if already processed
     output_file = data_folder / "gripper_distances.txt"
-    if args.skip_existing and output_file.exists():
+    if (args.skip_existing and output_file.exists()
+            and (data_folder / MANIFEST_NAME).exists()):
         result["status"] = "skipped"
         result["error"] = "Already exists"
         return result
@@ -219,14 +233,18 @@ def detect_folder(data_folder: Path, at_detector, args) -> dict:
     return result
 
 
-def normalize_and_save_folder(data_folder: Path, raw_distances, min_distance, max_distance) -> None:
-    """Scale raw distances to [0, 1] with a shared min/max and write outputs."""
+def normalize_and_save_folder(
+    data_folder: Path, raw_distances, min_distance, max_distance,
+    normalization_manifest,
+) -> None:
+    """Scale raw distances and write outputs plus normalization provenance."""
     gripper_distances_normalized = (raw_distances - min_distance) / (max_distance - min_distance)
     gripper_distances_normalized[gripper_distances_normalized > 1] = 1
     gripper_distances_normalized[gripper_distances_normalized < 0] = 0
 
     output_file = data_folder / "gripper_distances.txt"
     np.savetxt(output_file, gripper_distances_normalized)
+    write_manifest(data_folder, normalization_manifest)
 
     plot_path = data_folder / "gripper_distances.jpg"
     save_gripper_distance_plot(gripper_distances_normalized, plot_path)
@@ -295,8 +313,8 @@ Examples:
         sys.exit(1)
 
     manual_min = manual_max = None
+    range_cfg = {}
     if args.config:
-        import json
         with open(args.config) as f:
             range_cfg = json.load(f)
         manual_min = range_cfg.get("gripper_min_distance")
@@ -307,6 +325,19 @@ Examples:
     if not data_folders:
         print(f"No data folders with color images found in {input_dir}")
         sys.exit(1)
+
+    if args.skip_existing:
+        complete = [
+            folder for folder in data_folders
+            if (folder / "gripper_distances.txt").exists()
+            and (folder / MANIFEST_NAME).exists()
+        ]
+        if 0 < len(complete) < len(data_folders):
+            print(
+                "Partial existing batch detected; reprocessing every folder so "
+                "all outputs share one normalization range and root manifest."
+            )
+            args.skip_existing = False
 
     print(f"Found {len(data_folders)} data folder(s)")
 
@@ -343,9 +374,15 @@ Examples:
     pooled = np.concatenate([r["raw_distances"] for r in detected]) if detected else None
     if manual_min is not None and manual_max is not None:
         min_distance, max_distance = manual_min, manual_max
+        source_type = "manual_config"
         print(f"\nUsing manual gripper range from {args.config}: min={min_distance}, max={max_distance}")
     elif detected:
-        max_distance, min_distance = find_distances_max_min(pooled, threshold=0.05, threshold_num=10)
+        source_type = "pooled_robust_extrema"
+        max_distance, min_distance = find_distances_max_min(
+            pooled,
+            threshold=ROBUST_EXTREMUM_THRESHOLD,
+            threshold_num=ROBUST_EXTREMUM_MIN_SAMPLES,
+        )
         print(
             f"\nComputed gripper range from {len(detected)} folder(s): "
             f"min={min_distance}, max={max_distance}"
@@ -354,12 +391,35 @@ Examples:
         min_distance = max_distance = None
 
     if min_distance is not None:
+        manifest_config = {
+            "tag_family": "tag16h5",
+            "left_gripper_tag_id": args.left_tag_id,
+            "right_gripper_tag_id": args.right_tag_id,
+            "gripper_roi": args.gripper_roi,
+            "nominal_diag_distance": args.nominal_diag,
+            "threshold": args.threshold,
+            "gripper_range_source": range_cfg.get("gripper_range_source"),
+        }
+        normalization_manifest = build_manifest(
+            min_distance=min_distance,
+            max_distance=max_distance,
+            source_type=source_type,
+            config_path=args.config,
+            config=manifest_config,
+            median_filter_size=args.median_filter,
+            episode_count=len(detected),
+            frame_count=len(pooled),
+        )
         dist_plot_path = input_dir / "gripper_distance_distribution.png"
         save_gripper_range_plot(pooled, min_distance, max_distance, dist_plot_path)
+        write_manifest(input_dir, normalization_manifest)
 
         for result in detected:
             folder = Path(result["folder"])
-            normalize_and_save_folder(folder, result.pop("raw_distances"), min_distance, max_distance)
+            normalize_and_save_folder(
+                folder, result.pop("raw_distances"), min_distance, max_distance,
+                normalization_manifest,
+            )
             result["min_distance"] = min_distance
             result["max_distance"] = max_distance
 
@@ -381,7 +441,6 @@ Examples:
 
     # Save log
     if args.log:
-        import json
         log_data = {
             "processed_at": datetime.now().isoformat(),
             "input_directory": str(input_dir),
