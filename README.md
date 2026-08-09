@@ -1,5 +1,7 @@
 # SROI ROS Bag Utilities
 
+> 🌐 Builds the SROI datasets — see the **[Datasets page](https://agroboticsresearch.github.io/sroi_datasets/)** and **[SROI V2](https://agroboticsresearch.github.io/sroi_v2/)**.
+
 Tools for recording, processing, and converting SROI robot data for ORB-SLAM and LeRobot training pipelines.
 
 ---
@@ -58,6 +60,17 @@ python decode_videos.py ~/Desktop/435/20260520_143052-mp4 --recursive
 # Custom root
 python decode_videos.py ~/Desktop/435/20260520_143052-mp4 --recursive -o /path/to/png_root
 ```
+
+> **SROI_V2 dataset layout (what the lab datasets use):** decoded PNGs live in a
+> **standalone root that is a sibling of the MP4 store at dataset level** — e.g.
+> `1000-onesb-lab-picking/` (raw `*-mp4`) next to `1000-onesb-lab-picking-pngs/`
+> (all decoded `*-png` sessions), and likewise `20260803-occluded-cases/` →
+> `20260803-occluded-cases-pngs/`. The MP4 store stays pristine and the PNG tree
+> is one wipeable/regenerable folder. Achieve it with:
+> `batches/decode_batch.sh <dataset>/<name> <dataset>/<name>-pngs --jobs N`, or
+> per session with `python decode_videos.py <session>-mp4 --recursive -o <name>-pngs`.
+> Run ORB-SLAM / transform / gripper / QC against the `-pngs` root, never against
+> `-png` siblings inside the MP4 store.
 
 ### Step 3: Run ORB-SLAM3
 
@@ -134,6 +147,15 @@ is normalized against one shared min/max (robust clustered-extremum over pooled 
 distances) instead of each episode picking its own range. To set the range manually
 instead of auto-detecting it, add `"gripper_min_distance"` / `"gripper_max_distance"`
 (both required) to the camera config JSON passed via `--configs`.
+
+> **Shared normalization range (what the lab datasets use):** all SROI_V2 datasets
+> normalize against the gripper range recovered from the 1000-onesb dataset so
+> action vectors stay comparable across LeRobot datasets. Pass
+> `--configs configs/sroi_v2_d405_1000_onesb_range.json` (holds the
+> `gripper_min_distance`/`gripper_max_distance` from
+> `sroiv2_strawberry_picking_lab/1000-onesb-lab-picking-pngs`). Check the
+> `gripper_distance_distribution.png` histogram after each run to confirm the
+> fixed range still covers the new data.
 
 Each run also writes `gripper_distance_distribution.png` next to the input path — a
 histogram of the pooled raw distances with the selected min/max marked, so you can
