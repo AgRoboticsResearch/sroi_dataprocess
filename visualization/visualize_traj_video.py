@@ -178,9 +178,14 @@ def render_episode_video(ep_dir: Path, fps: int, codec: str, dpi: int = 100,
         return False
     images = sorted([*ep_dir.glob("color_*.png"), *ep_dir.glob("color_*.jpg")])
     if not images:
+        # Stereo-only (oak) episodes: the left camera IS the color camera.
+        images = sorted([*ep_dir.glob("left_*.png"), *ep_dir.glob("left_*.jpg")])
+    if not images:
         print(f"  skip {ep_dir.name}: no color frames")
         return False
     K = load_K(ep_dir / "camera_info_color.json")
+    if K is None:
+        K = load_K(ep_dir / "camera_info_left.json")
     n = min(len(poses), len(images))
     if n < 2:
         print(f"  skip {ep_dir.name}: too few frames ({n})")

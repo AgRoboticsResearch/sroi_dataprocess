@@ -3,6 +3,11 @@
 
 The source episode is never modified. Mask geometry and expected image dimensions come
 from a JSON config. Output stereo frames are always PNG so stereo_kitti can load them.
+
+When the actual frames differ from the config's image_size, the pixel geometry
+(polygons and black_below_row) is linearly rescaled onto the frames — e.g. a
+640x480 D405 config on 848x480 D435i IR frames — and a note is printed, so one
+mask definition can serve several resolutions.
 """
 
 import argparse
@@ -96,6 +101,22 @@ def load_mask_config(config_path: Path | str) -> dict:
     return _validate_mask_config(config, config_path)
 
 
+def _rescale_stream_config(stream_config: dict, from_size: tuple[int, int],
+                           to_size: tuple[int, int]) -> dict:
+    """Linearly rescale pixel mask geometry from one resolution to another."""
+    scale = (to_size[0] / from_size[0], to_size[1] / from_size[1])
+    return {
+        "polygons": [
+            np.round(polygon * np.asarray(scale, dtype=np.float64)).astype(np.int32)
+            for polygon in stream_config["polygons"]
+        ],
+        "black_below_row": (
+            None if stream_config["black_below_row"] is None
+            else int(round(stream_config["black_below_row"] * scale[1]))
+        ),
+    }
+
+
 def apply_mask(image: np.ndarray, stream_config: dict, image_size: tuple[int, int],
                source_path: Path | None = None) -> np.ndarray:
     if image is None:
@@ -166,6 +187,20 @@ def prepare_masked_episode(
         images = _find_stream_images(source_dir, stream)
         if not images:
             raise ValueError(f"{source_dir}: no {stream}_* stereo images found")
+        stream_config = config["streams"][stream]
+        expected_size = config["image_size"]
+        first = cv2.imread(str(images[0]), cv2.IMREAD_UNCHANGED)
+        if first is None:
+            raise ValueError(f"{source_dir}: cannot read {images[0]}")
+        if (first.shape[1], first.shape[0]) != expected_size:
+            expected_size = (first.shape[1], first.shape[0])
+            stream_config = _rescale_stream_config(
+                stream_config, config["image_size"], expected_size)
+            print(
+                f"mask geometry rescaled {config['image_size'][0]}x{config['image_size'][1]} "
+                f"-> {expected_size[0]}x{expected_size[1]} for '{stream}' frames "
+                f"({source_dir.name})"
+            )
         for frame_index, source in enumerate(images):
             expected_stem = f"{stream}_{frame_index:06d}"
             if source.stem != expected_stem:
@@ -175,8 +210,8 @@ def prepare_masked_episode(
             image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
             masked = apply_mask(
                 image,
-                config["streams"][stream],
-                config["image_size"],
+                stream_config,
+                expected_size,
                 source,
             )
             destination = output_dir / f"{source.stem}.png"

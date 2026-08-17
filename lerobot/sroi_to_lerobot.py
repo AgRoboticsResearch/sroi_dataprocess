@@ -153,12 +153,24 @@ def _is_episode_dir(path: Path) -> bool:
     return path.is_dir() and path.name.startswith("episode_")
 
 
+def _color_image_files(path: Path) -> list[Path]:
+    """Sorted camera frames of an episode.
+
+    Stereo-only (oak) episodes have no color_* files — their left camera IS
+    the color camera — so fall back to left_* frames there.
+    """
+    files = sorted([*path.glob("color_*.png"), *path.glob("color_*.jpg")])
+    if not files:
+        files = sorted([*path.glob("left_*.png"), *path.glob("left_*.jpg")])
+    return files
+
+
 def _is_convertible_episode(path: Path) -> bool:
     if not _is_episode_dir(path):
         return False
     has_pose = (path / "CameraTrajectoryTransformed.txt").exists()
     has_gripper = (path / "gripper_distances.txt").exists()
-    has_image = any(path.glob("color_*.png")) or any(path.glob("color_*.jpg"))
+    has_image = bool(_color_image_files(path))
     return has_pose and has_gripper and has_image
 
 
@@ -300,7 +312,7 @@ def create_lerobot_dataset(
 
     # Process the first episode to determine image shape for features
     first_ep_path = candidates[0][1]
-    sample_images = sorted([*first_ep_path.glob("color_*.png"), *first_ep_path.glob("color_*.jpg")])
+    sample_images = _color_image_files(first_ep_path)
     if not sample_images:
         raise ValueError(f"No images found in {first_ep_path}")
     sample_image = np.array(Image.open(str(sample_images[0])))
@@ -374,7 +386,7 @@ def create_lerobot_dataset(
         print(f"Episode length: {min_length} frames")
 
         # Check for image files
-        image_files = sorted([*ep_path.glob("color_*.png"), *ep_path.glob("color_*.jpg")])
+        image_files = _color_image_files(ep_path)
         if len(image_files) < min_length:
             print(f"Warning: Only {len(image_files)} images found, but {min_length} frames needed")
             min_length = min(min_length, len(image_files))

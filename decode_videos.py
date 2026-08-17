@@ -77,7 +77,8 @@ def decode_episode(episode_dir: Path, output_dir: Path):
 
     # Copy metadata files
     for name in ["camera_info_left.json", "camera_info_right.json",
-                 "camera_info_color.json", "times.txt", "timestamps.json"]:
+                 "camera_info_color.json", "times.txt", "timestamps.json",
+                 "imu.txt", "CALIBRATION_NOTE.txt"]:
         src = episode_dir / name
         if src.exists():
             shutil.copy2(src, output_dir / name)

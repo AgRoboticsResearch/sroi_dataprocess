@@ -269,15 +269,29 @@ TAG_FAMILIES = ["tag16h5", "tag25h9", "tag36h11", "tagCircle21h7", "tagCircle49h
                 "tagCustom48h12", "tagStandard41h12", "tagStandard52h13"]
 
 
+def find_color_images(data_folder):
+    """Sorted color frames of an episode.
+
+    Stereo-only (oak) episodes have no color_* files — their left camera IS
+    the color camera — so fall back to left_* frames there.
+    """
+    images = sorted(glob.glob(os.path.join(data_folder, "color_*.png"))
+                    + glob.glob(os.path.join(data_folder, "color_*.jpg")))
+    if not images:
+        images = sorted(glob.glob(os.path.join(data_folder, "left_*.png"))
+                        + glob.glob(os.path.join(data_folder, "left_*.jpg")))
+        if images:
+            print("No color_* images in", data_folder, "- using left_* frames as color stream")
+    return images
+
+
 def calibrate(data_folder, config_path, output_path):
     """Interactive calibration mode with cv2 GUI."""
     cfg = load_config(config_path)
     print_config(cfg, config_path)
 
     # Pick a sample image (middle frame for better coverage)
-    images = sorted(glob.glob(os.path.join(data_folder, "color_*.png")))
-    if not images:
-        images = sorted(glob.glob(os.path.join(data_folder, "color_*.jpg")))
+    images = find_color_images(data_folder)
     if not images:
         print("No color images found in", data_folder)
         return
@@ -400,7 +414,7 @@ def detect_raw_distances(data_folder, cfg, at_detector, verbose=False, median_fi
     nominal_diag_distance = cfg.get("nominal_diag_distance", cfg.get("norminal_diag_distance", 50))
     threshold = cfg["threshold"]
 
-    images = sorted(glob.glob(data_folder + "color_*.png") + glob.glob(data_folder + "color_*.jpg"))
+    images = find_color_images(data_folder)
     print("image_nums: ", len(images))
     gripper_distances = []
     for color_image_path in tqdm(images):

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "description": "SROI v1 ningbo rs435 (D435i) gripper mask for 848x480 stereo IR frames; geometry ported from gripper_mask_sroi_v2_d405.json (640x480) by x-scaling 640 -> 848",
+  "coordinate_convention": "Pixel [x, y] coordinates with origin at the top-left; x increases right and y increases down",
+  "source": {
+    "config": "gripper_mask_sroi_v2_d405.json",
+    "transform": "x *= 848/640, y unchanged (both 480 tall)"
+  },
+  "image_size": {
+    "width": 848,
+    "height": 480
+  },
+  "streams": {
+    "left": {
+      "polygons": [
+        [
+          [313, 292],
+          [553, 292],
+          [696, 467],
+          [168, 467]
+        ]
+      ],
+      "black_below_row": 467
+    },
+    "right": {
+      "polygons": [
+        [
+          [241, 292],
+          [484, 292],
+          [588, 467],
+          [61, 467]
+        ]
+      ],
+      "black_below_row": 467
+    }
+  }
+}

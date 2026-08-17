@@ -335,6 +335,20 @@ Then continue with ORB-SLAM3 (Step 3 in Pipeline A) and follow remaining steps.
 
 ---
 
+## Pipeline B′: SROI v1 ROS1 bags → v2 data (conversion)
+
+For the recorded v1 corpus (`oak_d_sr` + `realsense_d435i` rigs, e.g.
+`/mnt/data1/sroi/sroi_v1`): `v1_to_v2/convert_v1_bags.py` converts the bags
+into v2-style sessions — camera_info always from the bag (explicit fallback +
+`CALIBRATION_NOTE.txt` for the dec-2024 oak bags that lack it, resolution
+checked against the pixels), per-episode EuRoC `imu.txt`, and the tf_static
+extrinsics. The full-corpus run uses `--mp4-only` (PNG trees would need
+~265 GiB); PNG trees are regenerated per batch with `decode_videos.py`.
+The complete runbook — dry-run, full command, resume, verification,
+regenerating PNG trees — lives in `v1_to_v2/README.md`.
+
+---
+
 ## Dependencies
 
 ```bash

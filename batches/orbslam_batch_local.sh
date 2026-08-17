@@ -126,7 +126,12 @@ run_episode() {
     local folder="$1" idx="$2"
     local name cfg
     name="$(basename "$folder")"
-    cfg="$folder/orb_slam_realsense_d405.yaml"
+    # Prefer any per-episode ORB-SLAM config the session carries (d405, d435i,
+    # oak, ...); fall back to the historical d405 name, then the install default.
+    cfg="$(ls "$folder"/orb_slam_*.yaml 2>/dev/null | head -1)"
+    if [ -z "$cfg" ]; then
+        cfg="$folder/orb_slam_realsense_d405.yaml"
+    fi
     if [ ! -f "$cfg" ]; then
         echo "  Warning ($name): $cfg not found, using default"
         cfg="$ORB_SLAM_DIR/Examples/Stereo/RealSense_D405.yaml"
