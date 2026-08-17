@@ -61,13 +61,14 @@ def _validate_mask_config(config: dict, config_path: Path) -> dict:
             points = points.astype(np.int32)
             if (
                 (points[:, 0] < 0).any()
-                or (points[:, 0] >= width).any()
+                or (points[:, 0] > width).any()
                 or (points[:, 1] < 0).any()
-                or (points[:, 1] >= height).any()
+                or (points[:, 1] > height).any()
             ):
                 raise ValueError(
                     f"{config_path}: streams.{stream}.polygons[{polygon_index}] "
-                    f"falls outside {width}x{height}"
+                    f"falls outside {width}x{height} (touching the right/bottom "
+                    "edge is allowed)"
                 )
             normalized_polygons.append(points)
 
