@@ -173,8 +173,10 @@ Default is `1` (no filtering).
 
 ### Optional: Trajectory projection video
 
-The camera-to-gripper-tip transforms used by the projection overlay are loaded from a
-standalone JSON config:
+Each video shows the RGB frame with the projected gripper-tip path (left), the
+animated 3D trajectory (middle), and the full gripper-openness curve with a dot
+tracking the current frame (right). The camera-to-gripper-tip transforms used by
+the projection overlay are loaded from a standalone JSON config:
 
 ```bash
 python visualization/visualize_traj_video.py /path/to/session-png --recursive \
@@ -184,6 +186,15 @@ python visualization/visualize_traj_video.py /path/to/session-png --recursive \
 Use a different extrinsics config for a different camera/gripper assembly.
 The matrix convention and calibration checks are documented in
 [`doc/rig_configs.md`](doc/rig_configs.md).
+
+For reviewing a QC'd tree, pass `--qc-csv` (requires `--output`) to render every
+episode into one folder with its QC category as a colored on-video badge and a
+filename prefix (`ok_...`, `static_...`, ...), colors matching the QC PDF:
+
+```bash
+python visualization/visualize_traj_video.py /path/to/pngs --recursive \
+    --output /path/to/traj_videos --qc-csv /path/to/pngs/qc.csv
+```
 
 ### Step 6: QC and Convert to LeRobot Dataset
 

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Side-by-side video: camera color frames (left) next to an animated 3D ORB-SLAM3
-trajectory (right), for manual trajectory QC. Encodes H.264 MP4 via ffmpeg
-(libopenh264, since libx264 isn't installed here).
+Side-by-side video: camera color frames (left), an animated 3D ORB-SLAM3 trajectory
+(middle), and the gripper-openness curve (right), for manual trajectory QC.
+Encodes H.264 MP4 via ffmpeg (libopenh264, since libx264 isn't installed here).
 
 Per episode, reads CameraTrajectoryTransformed.txt (falls back to CameraTrajectory.txt)
 and the color_*.png frames, and writes <episode>/traj_sidebyside.mp4. The 3D panel
 uses a FIXED axis extent computed from the full trajectory (stable view, no rescaling)
-and progressively reveals the path with the current pose highlighted.
+and progressively reveals the path with the current pose highlighted. The gripper
+panel shows the full gripper_distances.txt curve with a dot tracking the current frame
+(or "no gripper data" when the file is absent).
 
 Usage (from repo root):
     # single episode
@@ -18,10 +20,15 @@ Usage (from repo root):
     # use the calibration for a specific camera/gripper assembly
     python visualization/visualize_traj_video.py .../session-png --recursive \
         --extrinsics-config configs/camera_gripper_extrinsics_sroi_v2_d405.json
+    # QC-badged videos for a whole processed tree: badge + filename prefix come
+    # from qc.py's qc.csv, colors from configs/qc_filters.json (requires --output)
+    python visualization/visualize_traj_video.py .../pngs --recursive \
+        --output .../traj_videos --qc-csv .../pngs/qc.csv
 Options: --fps 30 --codec libopenh264 --skip-existing --max-episodes N
 """
 
 import argparse
+import csv
 import json
 import subprocess
 import sys
@@ -101,6 +108,20 @@ def load_poses(traj_path: Path) -> np.ndarray | None:
     return np.concatenate([poses34, bottom], axis=1)  # (N, 4, 4)
 
 
+def load_gripper(ep_dir: Path) -> np.ndarray | None:
+    """Load normalized gripper distances (one float per frame), or None."""
+    path = ep_dir / "gripper_distances.txt"
+    if not path.exists():
+        return None
+    try:
+        raw = np.loadtxt(path)
+    except Exception:
+        return None
+    if raw.size == 0:
+        return None
+    return np.atleast_1d(raw)
+
+
 def load_K(cam_info_path: Path) -> np.ndarray | None:
     """Load the color camera intrinsics (3x3) from camera_info_color.json, or None."""
     import json
@@ -152,11 +173,41 @@ def _green_red_gradient(n_seg: int) -> list[tuple[float, float, float]]:
     return [((i / (n_seg - 1)), (1.0 - i / (n_seg - 1)), 0.0) for i in range(n_seg)]
 
 
-def _out_mp4_path(ep_dir: Path, out_dir: Path | None) -> Path:
-    """Output mp4 path for an episode: <out_dir>/<session>_<episode>.mp4 if out_dir
-    is given (all videos in one folder), else <episode>/traj_sidebyside.mp4."""
+QC_FILTERS_CONFIG = (
+    Path(__file__).resolve().parents[1] / "configs" / "qc_filters.json"
+)
+
+
+def load_qc_statuses(qc_csv: Path) -> dict[Path, str]:
+    """episode-dir -> QC category, from a visualization/qc.py CSV."""
+    with qc_csv.open() as f:
+        rows = list(csv.DictReader(f))
+    statuses = {}
+    for row in rows:
+        episode = row.get("path") or ""
+        category = row.get("category") or ""
+        if episode and category:
+            statuses[Path(episode).resolve()] = category
+    if not statuses:
+        raise ValueError(f"{qc_csv}: no usable rows (need 'path' and 'category' columns)")
+    return statuses
+
+
+def load_qc_colors() -> dict[str, str]:
+    """category -> badge color, matching qc.py's PDF color coding."""
+    with QC_FILTERS_CONFIG.open() as f:
+        categories = json.load(f)["categories"]
+    return {k: v["color"] for k, v in categories.items() if k != "_doc"}
+
+
+def _out_mp4_path(ep_dir: Path, out_dir: Path | None, prefix: str | None = None) -> Path:
+    """Output mp4 path for an episode: <out_dir>/<prefix_><session>_<episode>.mp4
+    if out_dir is given (all videos in one folder; the optional prefix is e.g. the
+    QC category), else <episode>/traj_sidebyside.mp4."""
     if out_dir is not None:
         stem = ep_dir.parent.name.replace("-png", "") + "_" + ep_dir.name
+        if prefix:
+            stem = f"{prefix}_{stem}"
         return out_dir / f"{stem}.mp4"
     return ep_dir / "traj_sidebyside.mp4"
 
@@ -164,11 +215,13 @@ def _out_mp4_path(ep_dir: Path, out_dir: Path | None) -> Path:
 def render_episode_video(ep_dir: Path, fps: int, codec: str, dpi: int = 100,
                          out_dir: Path | None = None,
                          badge: str | None = None, badge_color: str = "#2e7d32",
+                         prefix: str | None = None,
                          tip_kin: tuple[np.ndarray, np.ndarray] = TIP_KIN) -> bool:
     """Render one side-by-side traj video. Returns True on success.
 
-    Writes to <out_dir>/<session>_<episode>.mp4 when out_dir is set (all videos in one
-    folder), otherwise <episode>/traj_sidebyside.mp4 next to the data.
+    Writes to <out_dir>/<prefix_><session>_<episode>.mp4 when out_dir is set (all
+    videos in one folder; prefix is e.g. the QC category), otherwise
+    <episode>/traj_sidebyside.mp4 next to the data.
     """
     poses = load_poses(ep_dir / "CameraTrajectoryTransformed.txt")
     if poses is None:
@@ -200,11 +253,14 @@ def render_episode_video(ep_dir: Path, fps: int, codec: str, dpi: int = 100,
     hi = pos.max(axis=0) + pad
     path_len = float(np.sum(np.linalg.norm(np.diff(pos, axis=0), axis=1)))
 
-    # Figure: left = color frame (+ projected future traj), right = 3D trajectory.
-    fig = plt.figure(figsize=(12.8, 4.8), dpi=dpi)
-    ax_img = fig.add_subplot(1, 2, 1)
-    ax3d = fig.add_subplot(1, 2, 2, projection="3d")
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.04, wspace=0.12)
+    # Figure: left = color frame (+ projected future traj), middle = 3D trajectory,
+    # right = the full gripper-openness curve with a moving current-frame marker.
+    fig = plt.figure(figsize=(16.2, 4.8), dpi=dpi)
+    grid = fig.add_gridspec(1, 3, width_ratios=[1.5, 1.1, 0.75])
+    ax_img = fig.add_subplot(grid[0, 0])
+    ax3d = fig.add_subplot(grid[0, 1], projection="3d")
+    ax_grip = fig.add_subplot(grid[0, 2])
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.20)
 
     if badge:  # optional status badge (colored block + text), top-left of the video
         fig.text(0.005, 0.985, " " + badge + " ", color="white", fontsize=12,
@@ -241,8 +297,26 @@ def render_episode_video(ep_dir: Path, fps: int, codec: str, dpi: int = 100,
     ax3d.view_init(elev=22, azim=-60)
     ax3d.set_title(f"3D trajectory  ({path_len*100:.1f} cm)", fontsize=10)
 
+    # Gripper panel: full curve always visible, dot tracks the current frame.
+    grip = load_gripper(ep_dir)
+    grip = grip[:n] if grip is not None else None
+    if grip is not None:
+        ax_grip.plot(np.arange(len(grip)), grip, color="#6a1b9a", lw=1.6)
+        grip_dot = ax_grip.scatter([0], [grip[0]], c=["#D55E00"], s=42, zorder=5,
+                                   edgecolors="black", linewidths=0.5)
+        ax_grip.set_xlim(0, max(n - 1, 1))
+        ax_grip.set_ylim(-0.05, 1.05)
+        ax_grip.set_yticks([0.0, 0.5, 1.0])
+    else:
+        grip_dot = None
+        ax_grip.text(0.5, 0.5, "no gripper data", ha="center", va="center",
+                     transform=ax_grip.transAxes, fontsize=9, color="#757575")
+    ax_grip.set_title("gripper (0=closed, 1=open)", fontsize=10)
+    ax_grip.set_xlabel("frame", fontsize=8)
+    ax_grip.tick_params(labelsize=7)
+
     canvas_w, canvas_h = fig.canvas.get_width_height()
-    out_path = _out_mp4_path(ep_dir, out_dir)
+    out_path = _out_mp4_path(ep_dir, out_dir, prefix)
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -279,6 +353,8 @@ def render_episode_video(ep_dir: Path, fps: int, codec: str, dpi: int = 100,
             else:
                 fut_lc.set_segments([])
                 start_dot.set_offsets([[np.nan, np.nan]]); stop_dot.set_offsets([[np.nan, np.nan]])
+            if grip_dot is not None and t < len(grip):
+                grip_dot.set_offsets([[t, grip[t]]])
             fig.canvas.draw()
             rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3]  # (H, W, 3)
             proc.stdin.write(rgb.tobytes())
@@ -306,6 +382,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="Write ALL videos into this folder as <session>_<episode>.mp4 (default: <episode>/traj_sidebyside.mp4)")
     p.add_argument("--badge", default=None, help="Optional status badge text drawn top-left of the video")
     p.add_argument("--badge-color", default="#2e7d32", help="Badge background color (default green)")
+    p.add_argument("--qc-csv", type=Path, default=None,
+                   help="qc.py output CSV: render each episode with its QC category as a "
+                        "colored badge and filename prefix (requires --output; episodes "
+                        "missing from the CSV are skipped)")
     p.add_argument(
         "--extrinsics-config",
         type=Path,
@@ -318,6 +398,17 @@ def main(argv: list[str] | None = None) -> int:
         tip_kin = load_tip_kin(args.extrinsics_config)
     except ValueError as error:
         p.error(str(error))
+
+    qc_statuses = None
+    qc_colors = {}
+    if args.qc_csv is not None:
+        if args.output is None:
+            p.error("--qc-csv requires --output (badged videos go to one folder)")
+        try:
+            qc_statuses = load_qc_statuses(args.qc_csv)
+        except (OSError, ValueError) as error:
+            p.error(str(error))
+        qc_colors = load_qc_colors()
 
     if not args.path.exists():
         print(f"not found: {args.path}", file=sys.stderr); return 1
@@ -335,19 +426,28 @@ def main(argv: list[str] | None = None) -> int:
 
     done = 0; ok = 0
     for ep in eps:
-        out = _out_mp4_path(ep, args.output)
+        badge, badge_color, prefix = args.badge, args.badge_color, None
+        if qc_statuses is not None:
+            category = qc_statuses.get(ep.resolve())
+            if category is None:
+                print(f"  skip {ep.parent.name}/{ep.name}: not in {args.qc_csv.name}")
+                continue
+            badge, badge_color, prefix = category.upper(), qc_colors.get(category, "#757575"), category
+        out = _out_mp4_path(ep, args.output, prefix)
         if args.skip_existing and out.exists():
             continue
         if args.max_episodes and ok >= args.max_episodes:
             break
         print(f"[{done+1}/{len(eps)}] {ep.parent.name}/{ep.name}")
+        render_kwargs = {} if badge is None else {"badge": badge, "badge_color": badge_color}
+        if prefix is not None:
+            render_kwargs["prefix"] = prefix
         if render_episode_video(
             ep,
             args.fps,
             args.codec,
             out_dir=args.output,
-            badge=args.badge,
-            badge_color=args.badge_color,
+            **render_kwargs,
             tip_kin=tip_kin,
         ):
             ok += 1

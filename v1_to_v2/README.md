@@ -181,4 +181,11 @@ output tree for how it sits on v1 frames; `apply_gripper_mask.py` also
 auto-rescales any mask config onto other frame sizes now) →
 `transform_trajectory.py --recursive` → `gripper_estimation_april_tag.py
 --recursive --configs configs/sroi_v1_d435.json` (realsense; OAK needs a
-matching gripper config) → `visualization/qc.py`.
+matching gripper config) → `visualization/qc.py`. Note the ORB-SLAM batch takes
+a single session dir (episodes one level down), so loop it over the `-pngs`
+sessions. For reviewing the QC verdicts per episode, render badged review
+videos from the qc.csv (category as on-video badge + filename prefix):
+`visualization/visualize_traj_video.py <pngs-root> --recursive --output
+<traj_videos> --qc-csv <pngs-root>/qc.csv --codec libx264`. The tip-path
+projection inside those uses the v2 D405 extrinsics config by default —
+approximate for the v1 rig (no v1 extrinsics config exists yet).
