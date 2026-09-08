@@ -17,6 +17,7 @@ import logging
 import numpy as np
 import os
 import shutil
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from PIL import Image
@@ -26,6 +27,23 @@ from lerobot.utils.rotation import Rotation
 
 
 GRIPPER_NORMALIZATION_MANIFEST = "gripper_normalization.json"
+
+# Target-conditioning mode (opt-in via --target-conditioning): a constant
+# per-episode image feature with a circle around the hindsight-labeled target
+# strawberry. See target_ref.py at the repo root.
+TARGET_REF_FEATURE = "observation.images.target_ref"
+TARGET_QC_CSV = "target_qc.csv"
+
+
+def _target_ref_module():
+    """Lazily import the repo-root target_ref module (only needed for
+    --target-conditioning; keeps the default path free of extra imports)."""
+    repo_root = str(Path(__file__).resolve().parents[1])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    import target_ref
+
+    return target_ref
 
 
 def _copy_gripper_normalization(
@@ -282,6 +300,13 @@ def create_lerobot_dataset(
     num_workers: int = 4,
     qc_csv: str | None = None,
     qc_categories: str = "ok",
+    target_conditioning: bool = False,
+    extrinsics_config: str | None = None,
+    closed_threshold: float = 0.5,
+    grasp_hold_seconds: float = 0.5,
+    marker_style: str = "circle",
+    marker_radius_px: int | None = None,
+    marker_offset_px: int | None = None,
 ):
     """
     Convert SROI data to LeRobot dataset format.
@@ -304,11 +329,34 @@ def create_lerobot_dataset(
             filtered per session to those whose category is in qc_categories.
         qc_categories: Comma-separated category names to keep when qc_csv is set
             (default: "ok"). E.g. "ok,flat_gripper" to also keep no-actuation runs.
+        target_conditioning: Opt-in. Adds a constant per-episode
+            "observation.images.target_ref" video feature: the initial frame with a
+            circle around the hindsight-labeled target strawberry (see target_ref.py).
+            Episodes without a valid target are skipped and logged to
+            meta/target_qc.csv. Default off — the standard pipeline is unchanged.
+        extrinsics_config: Camera-to-gripper-tip JSON (default:
+            configs/camera_gripper_extrinsics_sroi_v2_d405.json).
+        closed_threshold: Gripper value below which the gripper counts as closed
+            (convention: 0=closed, 1=open).
+        grasp_hold_seconds: Minimum sustained closure duration for the grasp frame.
+        marker_style: "circle" (default), "bbox", or "point".
+        marker_radius_px: Marker radius in pixels (default: 30 at 480p, resolution-scaled).
+        marker_offset_px: Vertical offset of the marker center below the projected
+            picking point (default: = radius, so the circle covers the fruit).
     """
     data_path = Path(data_path)
     candidates, is_multi_session = _collect_episodes(data_path, qc_csv, qc_categories, episodes)
     mode = "multi-session" if is_multi_session else "single-session/episode"
     print(f"Mode: {mode}, {len(candidates)} episode(s) to convert")
+
+    tr = None
+    tip_kin = None
+    extrinsics_path = None
+    if target_conditioning:
+        tr = _target_ref_module()
+        extrinsics_path = Path(extrinsics_config) if extrinsics_config else tr.DEFAULT_EXTRINSICS_CONFIG
+        tip_kin = tr.load_tip_kin(extrinsics_path)
+        print(f"Target conditioning ON (extrinsics: {extrinsics_path})")
 
     # Process the first episode to determine image shape for features
     first_ep_path = candidates[0][1]
@@ -341,6 +389,12 @@ def create_lerobot_dataset(
             "shape": (7,)
         },
     }
+    if target_conditioning:
+        features[TARGET_REF_FEATURE] = {
+            "dtype": "video",
+            "shape": (h, w, 3),
+            "names": ["height", "width", "channels"],
+        }
 
     # Create dataset
     dataset = LeRobotDataset.create(
@@ -356,6 +410,7 @@ def create_lerobot_dataset(
 
     normalization_records: list[tuple[str, dict]] = []
     normalization_missing: list[str] = []
+    target_qc_rows: list[dict] = []
 
     # Process each episode
     for ep_idx, (session_name, ep_path) in enumerate(candidates):
@@ -396,9 +451,51 @@ def create_lerobot_dataset(
             rotvecs = rotvecs[:min_length]
             gripper_distances = gripper_distances[:min_length]
 
+        # Target conditioning: compute the hindsight target point ONCE per
+        # episode, before loading images. Episodes without a valid target are
+        # skipped (recorded in meta/target_qc.csv).
+        target_info = None
+        if target_conditioning:
+            K = tr.load_intrinsics(ep_path)
+            target_info = tr.episode_target_point(
+                poses[:min_length],
+                gripper_distances,
+                K,
+                tip_kin,
+                fps=fps,
+                image_shape=(h, w),
+                closed_threshold=closed_threshold,
+                hold_s=grasp_hold_seconds,
+            )
+            target_qc_rows.append({
+                "session": session_name,
+                "episode": ep_path.name,
+                "status": target_info["status"],
+                "t_g": target_info["t_g"],
+                "u": target_info["u"],
+                "v": target_info["v"],
+                "z": target_info["z"],
+            })
+            if target_info["status"] != tr.STATUS_OK:
+                print(f"Warning: skipping {label} - target conditioning: {target_info['status']}")
+                continue
+            print(f"Target: grasp frame t_g={target_info['t_g']}, "
+                  f"(u, v)=({target_info['u']:.1f}, {target_info['v']:.1f}), "
+                  f"z={target_info['z']:.3f} m")
+
         print(f"Loading {min_length} images with {num_workers} worker(s)...")
 
         images = load_images_parallel(image_files[:min_length], num_workers)
+
+        # The target reference is the INITIAL frame with the target-strawberry
+        # marker, constant for the whole episode.
+        target_ref_image = None
+        if target_conditioning:
+            target_ref_image = tr.draw_target_marker(
+                images[0], target_info["u"], target_info["v"],
+                radius_px=marker_radius_px, offset_px=marker_offset_px,
+                style=marker_style,
+            )
 
         print("Adding frames to dataset...")
 
@@ -425,6 +522,8 @@ def create_lerobot_dataset(
                 "action": action,
                 "task": single_task,
             }
+            if target_conditioning:
+                frame[TARGET_REF_FEATURE] = target_ref_image
 
             dataset.add_frame(frame)
 
@@ -453,6 +552,45 @@ def create_lerobot_dataset(
             for cif in camera_info_files:
                 shutil.copy2(cif, cam_dir / cif.name)
             print(f"Copied {len(camera_info_files)} camera info file(s) to {cam_dir}")
+
+        # Per-episode target metadata (audit + deployment parity).
+        if target_conditioning and target_info is not None:
+            target_dir = dataset.root / "meta" / "target_ref"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "session": session_name,
+                "episode": ep_path.name,
+                "grasp_frame": target_info["t_g"],
+                "u": target_info["u"],
+                "v": target_info["v"],
+                "z_m": target_info["z"],
+                "fps": fps,
+                "marker": {
+                    "style": marker_style,
+                    "radius_px": marker_radius_px,
+                    "offset_px": marker_offset_px,
+                    "color_rgb": list(tr.MARKER_COLOR_RGB),
+                },
+                "extrinsics_config": str(extrinsics_path),
+            }
+            with (target_dir / f"{norm_key}.json").open("w") as f:
+                json.dump(payload, f, indent=2)
+                f.write("\n")
+
+    if target_conditioning:
+        qc_path = dataset.root / "meta" / TARGET_QC_CSV
+        qc_path.parent.mkdir(parents=True, exist_ok=True)
+        with qc_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["session", "episode", "status", "t_g", "u", "v", "z"])
+            writer.writeheader()
+            writer.writerows(target_qc_rows)
+        n_ok = sum(1 for r in target_qc_rows if r["status"] == "ok")
+        print(f"Target QC: {n_ok}/{len(target_qc_rows)} episodes with valid target -> {qc_path}")
+        if n_ok == 0:
+            raise ValueError(
+                "target conditioning: no episode produced a valid target point; "
+                f"see {qc_path} for per-episode statuses"
+            )
 
     print(f"\nDataset created with {dataset.num_episodes} episode(s)")
     print(f"Dataset features: {list(dataset.features.keys())}")
@@ -536,6 +674,52 @@ def main():
         help="Comma-separated QC categories to keep when --qc_csv is set (default: 'ok'). "
              "Example: 'ok,flat_gripper'."
     )
+    parser.add_argument(
+        "--target-conditioning",
+        action="store_true",
+        help="Opt-in: add a constant per-episode observation.images.target_ref feature — the "
+             "initial frame with a circle around the hindsight-labeled target strawberry "
+             "(grasp-frame gripper tip projected into the initial image; see target_ref.py). "
+             "Episodes without a valid target are skipped and logged to meta/target_qc.csv."
+    )
+    parser.add_argument(
+        "--extrinsics-config",
+        type=str,
+        default=None,
+        help="Camera-to-gripper-tip JSON for target projection "
+             "(default: configs/camera_gripper_extrinsics_sroi_v2_d405.json)."
+    )
+    parser.add_argument(
+        "--closed-threshold",
+        type=float,
+        default=0.5,
+        help="Gripper value below which the gripper counts as closed (0=closed, 1=open; default 0.5)."
+    )
+    parser.add_argument(
+        "--grasp-hold-seconds",
+        type=float,
+        default=0.5,
+        help="Minimum sustained closure duration to accept a grasp (default: 0.5 s)."
+    )
+    parser.add_argument(
+        "--marker-style",
+        choices=["circle", "bbox", "point"],
+        default="circle",
+        help="Target marker style (default: circle)."
+    )
+    parser.add_argument(
+        "--marker-radius-px",
+        type=int,
+        default=None,
+        help="Marker radius in pixels (default: 30 at 480p, scaled by resolution)."
+    )
+    parser.add_argument(
+        "--marker-offset-px",
+        type=int,
+        default=None,
+        help="Vertical offset of the marker center below the projected picking point "
+             "(default: = radius, so the circle covers the fruit hanging below)."
+    )
 
     args = parser.parse_args()
 
@@ -558,6 +742,13 @@ def main():
         num_workers=args.num_workers,
         qc_csv=args.qc_csv,
         qc_categories=args.qc_categories,
+        target_conditioning=args.target_conditioning,
+        extrinsics_config=args.extrinsics_config,
+        closed_threshold=args.closed_threshold,
+        grasp_hold_seconds=args.grasp_hold_seconds,
+        marker_style=args.marker_style,
+        marker_radius_px=args.marker_radius_px,
+        marker_offset_px=args.marker_offset_px,
     )
     
     print("Conversion completed successfully!")

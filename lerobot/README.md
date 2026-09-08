@@ -105,6 +105,77 @@ There is also an example wrapper `example_convert.py` in the same folder for qui
 - `--num_workers`: Parallel image-loading workers (default: `4`; use `1` for sequential loading).
 - `--qc_csv`: Optional path to `qc.csv` from `visualization/qc.py`; filters episodes by QC category for each session.
 - `--qc_categories`: Comma-separated QC categories to keep when `--qc_csv` is set (default: `ok`).
+- `--target-conditioning`: Opt-in target-conditioned mode; see below. Off by default — the standard dataset is unchanged.
+- `--extrinsics-config`: Camera-to-gripper-tip JSON for target projection (default: `configs/camera_gripper_extrinsics_sroi_v2_d405.json`).
+- `--closed-threshold` / `--grasp-hold-seconds`: Grasp detection tuning (defaults `0.5` / `0.5 s`).
+- `--marker-style` / `--marker-radius-px` / `--marker-offset-px`: Marker rendering (defaults `circle` / 30 px at 480p / = radius).
+
+## Target-conditioned datasets (`observation.images.target_ref`)
+
+Opt-in mode (`--target-conditioning`) for disambiguating *which* strawberry to pick when several
+are visible. Each episode gets a second, **constant** image feature:
+
+```
+observation.images.camera     = current frame I_t          (unchanged)
+observation.images.target_ref = initial frame I_0 + circle around the target strawberry
+```
+
+The label is derived purely geometrically from the demonstration (no detection/segmentation):
+
+1. `target_ref.detect_grasp_frame` finds the start of the **final sustained gripper closure**
+   (gripper convention 0=closed/1=open, NaN-filled, moving-average smoothing, ≥0.5 s hold) — not
+   the last frame, so the post-grasp pull-away does not matter.
+2. The gripper-tip pose at that frame is projected into the initial image with the same math as
+   `visualization/visualize_traj_video.py`: `p = (T_optical_camera @ inv(poses[0]) @ poses[t_g] @
+   T_camera_gripper_tip)[:3,3]`, then pinhole projection with `camera_info_color.json`.
+3. A rough cyan circle (default radius 30 px at 480p) is drawn **below** the projected picking
+   point so it covers the fruit. It is an object label ("this strawberry"), not a picking
+   location — the policy still learns where/how to grasp.
+
+QC: episodes with no sustained closure, invalid depth (z ≤ 0 or z > 1.5 m), or an out-of-frame
+projection are **skipped** and logged with their status to `meta/target_qc.csv`; per-episode
+details land in `meta/target_ref/<episode>.json`. Inspect labels before training:
+
+```bash
+python visualization/visualize_target_ref.py /path/to/data --recursive --num-samples 24 -o /tmp/target_qc.pdf
+```
+
+Conversion:
+
+```bash
+python lerobot/sroi_to_lerobot.py \
+    --data_path /path/to/session-png --repo_id sroi/lab_picking_targeted \
+    --fps 30 --root /mnt/data1/data/lerobot/lab_picking_targeted \
+    --task "pick the marked strawberry" --target-conditioning
+```
+
+**Training (ACT / π0.5): no config change needed.** Any `observation.images.*` video feature
+auto-becomes a VISUAL policy input (`dataset_to_policy_features`); ACT encodes it with the shared
+ResNet backbone and concatenates the tokens, π0.5 embeds it like every other camera. Keep
+`consecutive_frames=1` (default) so the static reference is not frame-stacked. For the policy to
+actually use `target_ref`, the training data must contain meaningful target variation: in
+multi-strawberry scenes, record otherwise-similar episodes picking *different* fruit, or the
+network can ignore the marker and learn a positional bias. Single-strawberry episodes remain
+usable as-is.
+
+**Deployment:** capture the initial image, let the user click the desired strawberry, render the
+identical marker, and freeze the result for the whole episode:
+
+```bash
+python lerobot/render_target_ref.py --image init.png --u 320 --v 240 -o target_ref.png
+```
+
+(the click is on the fruit itself, so the circle is centered on the click — offset 0.)
+
+**Evaluation:** keep the existing picking metric and add, bucketed by 1 / 2 / 3 / 4+ visible
+strawberries: intended-target success, any-strawberry success, wrong-target rate, and
+failure-to-commit rate. Strongest test: reset the same scene and run it once with target_ref
+marking fruit A and once marking fruit B — the same policy should pick the marked one.
+
+**Test:** `lerobot/test_target_conditioning_e2e.py` converts a synthetic episode (known grasp
+frame) plus optionally a real one (`--episode-dir`) and checks that target_ref exists, is
+constant across the episode, lands at the expected pixel, and that the default mode is
+unaffected.
 
 ## Merging Completed LeRobot Datasets
 
