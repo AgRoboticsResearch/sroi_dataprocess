@@ -42,6 +42,7 @@ STATUS_NO_SUSTAINED_CLOSURE = "no_sustained_closure"
 STATUS_NO_INTRINSICS = "no_intrinsics"
 STATUS_DEPTH_INVALID = "depth_invalid"
 STATUS_OUT_OF_FRAME = "out_of_frame"
+STATUS_CLOSURE_AT_START = "closure_at_start"
 
 # Plausibility bounds for the projected depth (meters). A strawberry pick happens
 # well inside 1.5 m; anything beyond indicates unstable VO.
@@ -252,6 +253,11 @@ def episode_target_point(
     result["t_g"] = t_g
     if t_g is None:
         result["status"] = STATUS_NO_SUSTAINED_CLOSURE
+        return result
+    if t_g == 0:
+        # Gripper already closed when the episode starts: no pick event is
+        # observed, and the marker would just point at the resting gripper.
+        result["status"] = STATUS_CLOSURE_AT_START
         return result
 
     u, v, z = project_tip_into_initial(poses[:n], t_g, K, tip_kin)

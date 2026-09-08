@@ -132,8 +132,9 @@ The label is derived purely geometrically from the demonstration (no detection/s
    point so it covers the fruit. It is an object label ("this strawberry"), not a picking
    location — the policy still learns where/how to grasp.
 
-QC: episodes with no sustained closure, invalid depth (z ≤ 0 or z > 1.5 m), or an out-of-frame
-projection are **skipped** and logged with their status to `meta/target_qc.csv`; per-episode
+QC: episodes with no sustained closure, a gripper already closed at episode start (no pick
+event observed), invalid depth (z ≤ 0 or z > 1.5 m), or an out-of-frame projection are
+**skipped** and logged with their status to `meta/target_qc.csv`; per-episode
 details land in `meta/target_ref/<episode>.json`. Inspect labels before training:
 
 ```bash

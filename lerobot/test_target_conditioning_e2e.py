@@ -10,7 +10,8 @@ without — and verifies:
   3. the detected grasp frame and projected (u, v) match independent computation;
   4. the marker is visible at the expected location (differs from the plain
      camera frame there, matches elsewhere);
-  5. meta/target_ref/episode_001.json and meta/target_qc.csv are written;
+  5. meta/target_ref/episode_001.json and meta/target_qc.csv are written, and an
+     episode whose gripper is closed from frame 0 is rejected (closure_at_start);
   6. default mode (no flag): the dataset has NO target_ref feature — the
      standard pipeline is unaffected.
 
@@ -87,6 +88,16 @@ def build_synthetic_episode(root: Path) -> Path:
 
     with (ep / "camera_info_color.json").open("w") as f:
         json.dump({"width": W, "height": H, "K": K_SYNTH}, f)
+
+    # episode_002: gripper closed from the very first frame — no pick event;
+    # target conditioning must reject it with status closure_at_start.
+    ep2 = ep.parent / "episode_002"
+    ep2.mkdir()
+    for i in range(N_FRAMES):
+        Image.fromarray(base).save(ep2 / f"color_{i:06d}.png")
+    shutil.copy(ep / "CameraTrajectoryTransformed.txt", ep2 / "CameraTrajectoryTransformed.txt")
+    np.savetxt(ep2 / "gripper_distances.txt", np.full(N_FRAMES, 0.1), fmt="%.6f")
+    shutil.copy(ep / "camera_info_color.json", ep2 / "camera_info_color.json")
     return ep.parent  # session dir
 
 
@@ -96,7 +107,8 @@ def expected_target(ep_dir: Path) -> dict:
     return tr.compute_episode_target(ep_dir, tip_kin, fps=FPS)
 
 
-def check_converted_dataset(root: Path, ep_dir: Path, expected: dict | None) -> None:
+def check_converted_dataset(root: Path, ep_dir: Path, expected: dict | None,
+                            rejected: dict[str, str] | None = None) -> None:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     ds = LeRobotDataset("test/target_ref_e2e", root=root)
@@ -126,6 +138,14 @@ def check_converted_dataset(root: Path, ep_dir: Path, expected: dict | None) -> 
 
     qc_path = root / "meta" / "target_qc.csv"
     check("target_qc.csv written", qc_path.exists(), str(qc_path))
+    if qc_path.exists() and rejected:
+        import csv as _csv
+        rows = {r["episode"]: r["status"] for r in _csv.DictReader(qc_path.open())}
+        for ep_name, want_status in rejected.items():
+            check(f"episode rejected as {want_status}", rows.get(ep_name) == want_status,
+                  f"{ep_name}: got {rows.get(ep_name)}")
+        check("only valid episodes converted", ds.num_episodes == 1,
+              f"num_episodes={ds.num_episodes}")
 
     # Marker visibility: target_ref vs plain camera frame (both decoded, lossy) —
     # the difference must concentrate around the marker, not the rest of the image.
@@ -183,7 +203,8 @@ def main() -> int:
 
         ds_root = tmp / "ds_target"
         run_conversion(session, ds_root, target_conditioning=True)
-        check_converted_dataset(ds_root, ep_dir, expected)
+        check_converted_dataset(ds_root, ep_dir, expected,
+                                rejected={"episode_002": tr.STATUS_CLOSURE_AT_START})
 
         print("\n== 2. synthetic episode, default mode (flag OFF) ==")
         plain_root = tmp / "ds_plain"
