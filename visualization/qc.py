@@ -217,7 +217,13 @@ def _load_trajectory(traj_path: Path) -> np.ndarray | None:
         raw = raw.reshape(1, -1)
     if raw.shape[1] < 12:
         return None
-    poses = raw[:, :12].reshape(-1, 3, 4)
+    if raw.shape[1] > 12:
+        # Lines carry a leading timestamp; drop it so columns stay aligned.
+        # (Taking raw[:, :12] instead silently shifted everything: the
+        # "translation" became a rotation-matrix column and path lengths
+        # came out as nonsense, e.g. 108cm for a 48cm trajectory.)
+        raw = raw[:, -12:]
+    poses = raw.reshape(-1, 3, 4)
     return poses[:, :3, 3]
 
 
