@@ -23,6 +23,11 @@ def build_manifest(
     median_filter_size: int,
     episode_count: int,
     frame_count: int,
+    interp_mode: str = "linear",
+    preprocess_chain: list[str] | None = None,
+    symmetry_enabled: bool = True,
+    symmetry_tol_px: float | None = None,
+    spike_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Build the normalization provenance shared by a processing run."""
     min_distance = float(min_distance)
@@ -45,8 +50,29 @@ def build_manifest(
             "minimum_nearby_samples": ROBUST_EXTREMUM_MIN_SAMPLES,
         }
 
+    fill_description = (
+        "linear_interpolation_interior_nearest_edges"
+        if interp_mode == "linear"
+        else "leading_first_valid_then_forward_fill"
+    )
+    processing: dict[str, Any] = {
+        "missing_detection_fill": fill_description,
+        "median_filter_size": int(median_filter_size),
+        "preprocess_chain": list(preprocess_chain) if preprocess_chain else [],
+        "symmetry_constraint": {
+            "enabled": bool(symmetry_enabled),
+            **({"tolerance_px": float(symmetry_tol_px)}
+               if symmetry_tol_px is not None else {}),
+        },
+    }
+    if spike_threshold is not None:
+        processing["spike_removal"] = {
+            "threshold_of_range": float(spike_threshold),
+            "flat_context": "both_sides",
+        }
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "output_file": "gripper_distances.txt",
         "value_convention": {
             "closed": 0.0,
@@ -70,10 +96,7 @@ def build_manifest(
             ),
             "tag_size_threshold_px": config.get("threshold"),
         },
-        "processing": {
-            "missing_detection_fill": "leading_first_valid_then_forward_fill",
-            "median_filter_size": int(median_filter_size),
-        },
+        "processing": processing,
         "run_scope": {
             "episode_count": int(episode_count),
             "frame_count": int(frame_count),

@@ -1,0 +1,19 @@
+{
+ "schema_version": 1,
+ "description": "SROI v2 D405 half mask (legacy scheme): no polygons, everything below row 292 blacked out on 640x480 stereo IR frames",
+ "coordinate_convention": "Pixel [x, y] coordinates with origin at the top-left; x increases right and y increases down",
+ "image_size": {
+  "width": 640,
+  "height": 480
+ },
+ "streams": {
+  "left": {
+   "polygons": [],
+   "black_below_row": 292
+  },
+  "right": {
+   "polygons": [],
+   "black_below_row": 292
+  }
+ }
+}

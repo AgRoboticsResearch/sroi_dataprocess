@@ -6,5 +6,10 @@
     "left_gripper_tag_id": 0,
     "right_gripper_tag_id": 15,
     "nominal_diag_distance": 41,
-    "threshold": 9
+    "threshold": 9,
+    "left_tag_x_range": [147, 318],
+    "right_tag_x_range": [322, 493],
+    "prior_center_px": 320,
+    "prior_center_tol_px": 12,
+    "tag_distance_bounds": [78, 267]
 }

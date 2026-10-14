@@ -27,6 +27,70 @@ from lerobot.utils.rotation import Rotation
 
 GRIPPER_NORMALIZATION_MANIFEST = "gripper_normalization.json"
 
+# --- Start-segment (quasi-static head) trimming --------------------------------
+# Recordings open with a quasi-static head: the hand hovers in place (jitter
+# with occasional slow drift) before committing to the pick. Two-stage rule
+# (user-designed 2026-10-13, validated on 1138 episodes):
+#   1. ANCHOR   - the first frame whose net displacement from frame 0 reaches
+#                 `gate_mm`. Generous enough that jitter/drift cannot trigger it.
+#   2. BACK-WALK- from a seeded step at/after the anchor, walk backwards while
+#                 each step qualifies: magnitude >= `step_min_mm` AND direction
+#                 within `angle_max_deg` of the step above it. The first
+#                 non-qualifying step marks the start of the consistent run;
+#                 data is kept from that frame. Oscillating hover-with-drift
+#                 fails the angle test and stays trimmed; genuine (possibly
+#                 curvy) approach keeps its acceleration ramp.
+# Episode that never reaches the gate is kept whole; the trim is capped at
+# `max_fraction` of the episode as a safety net.
+TRIM_GATE_MM = 10.0        # anchor: net displacement from the first frame
+TRIM_STEP_MIN_MM = 0.8     # qualifying back-walk step magnitude
+TRIM_ANGLE_MAX_DEG = 10.0  # max angle between adjacent back-walk steps
+TRIM_SEED_WINDOW = 15      # frames after the anchor to look for a seed step
+TRIM_MAX_FRACTION = 0.3    # safety cap: never trim more than this fraction
+
+
+def find_start_trim_count(
+    positions: np.ndarray,
+    gate_mm: float = TRIM_GATE_MM,
+    step_min_mm: float = TRIM_STEP_MIN_MM,
+    angle_max_deg: float = TRIM_ANGLE_MAX_DEG,
+    seed_window: int = TRIM_SEED_WINDOW,
+    max_fraction: float = TRIM_MAX_FRACTION,
+) -> int:
+    """Number of leading quasi-static frames to drop (see block comment above).
+
+    Returns 0 when the episode is too short, never leaves the start vicinity,
+    or no seed step exists after the anchor (conservative: keep everything).
+    """
+    n = len(positions)
+    if n < 8:
+        return 0
+    d0 = np.linalg.norm(positions - positions[0], axis=1) * 1000.0  # mm
+    hit = np.nonzero(d0 >= gate_mm)[0]
+    if not len(hit):
+        return 0  # never leaves the start vicinity: keep everything
+    m = int(hit[0])
+    steps = np.diff(positions, axis=0) * 1000.0
+    sn = np.linalg.norm(steps, axis=1)
+    # seed: first step of at least step_min_mm within `seed_window` after anchor
+    seed = None
+    for i in range(m, min(n - 1, m + seed_window)):
+        if sn[i] >= step_min_mm:
+            seed = i
+            break
+    if seed is None:
+        return 0
+    j = seed
+    while j - 1 >= 0:
+        if sn[j - 1] < step_min_mm:
+            break
+        a, b = steps[j], steps[j - 1]
+        cosang = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)
+        if np.degrees(np.arccos(np.clip(cosang, -1.0, 1.0))) > angle_max_deg:
+            break
+        j -= 1
+    return min(j, int(max_fraction * n))
+
 
 def _copy_gripper_normalization(
     episode_path: Path,
@@ -282,6 +346,7 @@ def create_lerobot_dataset(
     num_workers: int = 4,
     qc_csv: str | None = None,
     qc_categories: str = "ok",
+    trim_start: bool = True,
 ):
     """
     Convert SROI data to LeRobot dataset format.
@@ -304,6 +369,8 @@ def create_lerobot_dataset(
             filtered per session to those whose category is in qc_categories.
         qc_categories: Comma-separated category names to keep when qc_csv is set
             (default: "ok"). E.g. "ok,flat_gripper" to also keep no-actuation runs.
+        trim_start: Drop the quasi-static head frames of each episode (see
+            find_start_trim_count). Counts are recorded in meta/start_trim.json.
     """
     data_path = Path(data_path)
     candidates, is_multi_session = _collect_episodes(data_path, qc_csv, qc_categories, episodes)
@@ -326,6 +393,21 @@ def create_lerobot_dataset(
             "dtype": "video",
             "shape": (h, w, 3),
             "names": ["height", "width", "channels"],
+        },
+        # Current-frame EE pose; RelativeEEDataset reads this as T_current when
+        # computing relative actions (T_rel = T_current^-1 @ T_future).
+        "observation.ee": {
+            "dtype": "float32",
+            "names": [
+                "ee.x",
+                "ee.y",
+                "ee.z",
+                "ee.wx",
+                "ee.wy",
+                "ee.wz",
+                "ee.gripper_pos",
+            ],
+            "shape": (7,),
         },
         "action": {
             "dtype": "float32",
@@ -356,6 +438,7 @@ def create_lerobot_dataset(
 
     normalization_records: list[tuple[str, dict]] = []
     normalization_missing: list[str] = []
+    start_trims: dict[str, int] = {}
 
     # Process each episode
     for ep_idx, (session_name, ep_path) in enumerate(candidates):
@@ -396,6 +479,19 @@ def create_lerobot_dataset(
             rotvecs = rotvecs[:min_length]
             gripper_distances = gripper_distances[:min_length]
 
+        # Trim the quasi-static recording head (pause before the hand starts
+        # moving); keeps every stream aligned by slicing off the same frames.
+        trim = find_start_trim_count(positions[:min_length]) if trim_start else 0
+        if trim > 0:
+            timestamps = timestamps[trim:]
+            positions = positions[trim:]
+            rotvecs = rotvecs[trim:]
+            gripper_distances = gripper_distances[trim:]
+            image_files = image_files[trim:]
+            min_length -= trim
+            start_trims[label] = trim
+            print(f"Trimmed {trim} quasi-static head frame(s); {min_length} remain")
+
         print(f"Loading {min_length} images with {num_workers} worker(s)...")
 
         images = load_images_parallel(image_files[:min_length], num_workers)
@@ -405,6 +501,17 @@ def create_lerobot_dataset(
         # Add frames to dataset
         for i in range(min_length):
             image = images[i]
+
+            # Current-frame EE pose (T_current for RelativeEEDataset).
+            observation_ee = np.array([
+                positions[i, 0],  # x
+                positions[i, 1],  # y
+                positions[i, 2],  # z
+                rotvecs[i, 0],    # wx
+                rotvecs[i, 1],    # wy
+                rotvecs[i, 2],    # wz
+                gripper_distances[i],  # gripper_pos
+            ], dtype=np.float32)
 
             # Action (next state)
             # For the last frame, we repeat the last state
@@ -422,6 +529,7 @@ def create_lerobot_dataset(
             # Build frame
             frame = {
                 "observation.images.camera": image,
+                "observation.ee": observation_ee,
                 "action": action,
                 "task": single_task,
             }
@@ -459,6 +567,23 @@ def create_lerobot_dataset(
     summary_path = _write_gripper_normalization_summary(
         dataset.root, normalization_records, normalization_missing
     )
+    if trim_start:
+        trim_summary = {
+            "rule": {
+                "anchor_gate_mm": TRIM_GATE_MM,
+                "step_min_mm": TRIM_STEP_MIN_MM,
+                "angle_max_deg": TRIM_ANGLE_MAX_DEG,
+                "seed_window_frames": TRIM_SEED_WINDOW,
+                "max_fraction": TRIM_MAX_FRACTION,
+            },
+            "episodes_trimmed": len(start_trims),
+            "start_trim_frames": start_trims,
+        }
+        trim_path = dataset.root / "meta" / "start_trim.json"
+        with trim_path.open("w") as f:
+            json.dump(trim_summary, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        print(f"Start-trim metadata: {trim_path} ({len(start_trims)} episode(s) trimmed)")
     print(f"Gripper normalization metadata: {summary_path}")
 
     dataset.finalize()
@@ -536,6 +661,12 @@ def main():
         help="Comma-separated QC categories to keep when --qc_csv is set (default: 'ok'). "
              "Example: 'ok,flat_gripper'."
     )
+    parser.add_argument(
+        "--no_trim_start",
+        action="store_true",
+        help="Disable trimming of the quasi-static recording head (default: trim on; "
+             "counts recorded in meta/start_trim.json)"
+    )
 
     args = parser.parse_args()
 
@@ -558,6 +689,7 @@ def main():
         num_workers=args.num_workers,
         qc_csv=args.qc_csv,
         qc_categories=args.qc_categories,
+        trim_start=not args.no_trim_start,
     )
     
     print("Conversion completed successfully!")

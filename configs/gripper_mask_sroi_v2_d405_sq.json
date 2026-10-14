@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "description": "SROI v2 D405 gripper mask + square extension: the base trapezoid plus a square whose side equals the trapezoid's upper edge (181px), stacked on top (rows 111-292). Covers the manipulation zone where strawberries/leaves/stems move during grasping. Stored as one hexagon polygon per stream (all six corners, including both trapezoid top corners, so no closing-chord wedge is added).",
+  "coordinate_convention": "Pixel [x, y] coordinates with origin at the top-left; x increases right and y increases down",
+  "image_size": {
+    "width": 640,
+    "height": 480
+  },
+  "streams": {
+    "left": {
+      "polygons": [
+        [
+          [236, 111],
+          [417, 111],
+          [417, 292],
+          [525, 467],
+          [127, 467],
+          [236, 292]
+        ]
+      ],
+      "black_below_row": 467
+    },
+    "right": {
+      "polygons": [
+        [
+          [182, 111],
+          [365, 111],
+          [365, 292],
+          [444, 467],
+          [46, 467],
+          [182, 292]
+        ]
+      ],
+      "black_below_row": 467
+    }
+  }
+}

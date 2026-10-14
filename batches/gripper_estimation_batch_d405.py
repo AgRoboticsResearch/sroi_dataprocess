@@ -2,8 +2,14 @@
 """
 Batch Gripper Estimation using AprilTags (RealSense D405 defaults).
 
-D405-specific version with tuned parameters:
+D405-specific version with tuned parameters (defaults match configs/sroi_v2_d405.json
+when passed via --config-file; flag defaults kept for backward compatibility):
   gripper_roi=200, nominal_diag=42, threshold=15
+
+Detection and series recovery are shared with gripper_estimation_april_tag.py
+via gripper_tag_core.py: preprocessing fallback chain, symmetric-jaw
+constraint (single-tag mirror + both-tag cross-validation), flat-context
+spike removal, and linear gap interpolation instead of legacy forward-fill.
 
 Usage:
     python gripper_estimation_batch_d405.py -i test_output/
@@ -26,9 +32,13 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for headless operation
 import matplotlib.pyplot as plt
 import glob
-import copy
 from pupil_apriltags import Detector
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ImportError:  # system python3 may lack tqdm; fall back to a plain iterable
+    def tqdm(iterable=None, **kwargs):
+        return iterable if iterable is not None else ()
 from scipy.signal import medfilt
 
 import numpy as np
@@ -40,77 +50,22 @@ from gripper_normalization import (
     build_manifest,
     write_manifest,
 )
+from gripper_tag_core import (
+    DEFAULT_PREPROCESS_CHAIN,
+    DEFAULT_SPIKE_THRESHOLD,
+    DEFAULT_SYMMETRY_TOL_PX,
+    detect_episode,
+    finalize_series,
+    find_distances_max_min,
+    run_center_fallback,
+)
 
-
-def check_tag_valid(tag, nominal_diag_distance=50, threshold=10):
-    """Check if detected tag is valid based on diagonal distance."""
-    diag_distance_1 = np.linalg.norm(tag.corners[0] - tag.corners[2])
-    diag_distance_2 = np.linalg.norm(tag.corners[1] - tag.corners[3])
-    if abs(diag_distance_1 - nominal_diag_distance) > threshold or abs(diag_distance_2 - nominal_diag_distance) > threshold:
-        return False
-    else:
-        return True
-
-
-def detect_april_tag(image, gripper_roi, at_detector, left_gripper_tag_id, right_gripper_tag_id, nominal_diag_distance, threshold, verbose=False):
-    """Detect AprilTags and compute gripper distance."""
-    gripper_distance_current = None
-    left_gripper_tag = None
-    right_gripper_tag = None
-
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-    gray[0:gripper_roi, :] = 0
-    ret = at_detector.detect(gray)
-    if verbose:
-        print("detected tag: ", ret)
-    for res in ret:
-        if res.tag_id == left_gripper_tag_id:
-            if check_tag_valid(res, nominal_diag_distance=nominal_diag_distance, threshold=threshold):
-                left_gripper_tag = res
-        elif res.tag_id == right_gripper_tag_id:
-            if check_tag_valid(res, nominal_diag_distance=nominal_diag_distance, threshold=threshold):
-                right_gripper_tag = res
-
-    if left_gripper_tag is not None and right_gripper_tag is not None:
-        gripper_distance = abs(right_gripper_tag.center[0] - left_gripper_tag.center[0])
-        return gripper_distance
-    else:
-        return None
-
-
-def find_distances_max_min(distances, threshold=0.05, threshold_num=10):
-    """Find valid max and min distances from the data."""
-    distances_copy = copy.deepcopy(distances)
-    ret_max_distance, ret_min_distance = None, None
-    for _ in range(len(distances)):
-        max_dist_id = np.argmax(distances)
-        max_distance = distances[max_dist_id]
-        data_in_range = distances[(distances > max_distance * (1 - threshold)) & (distances < max_distance * (1 + threshold))]
-        if len(data_in_range) >= threshold_num:
-            ret_max_distance = max_distance
-            break
-        distances[max_dist_id] = -1
-    if ret_max_distance is None:
-        ret_max_distance = np.max(distances_copy)
-
-    distances = distances_copy
-    for _ in range(len(distances)):
-        min_dist_id = np.argmin(distances)
-        min_distance = distances[min_dist_id]
-        data_in_range = distances[(distances > min_distance * (1 - threshold)) & (distances < min_distance * (1 + threshold))]
-        if len(data_in_range) >= threshold_num:
-            ret_min_distance = min_distance
-            break
-        distances[min_dist_id] = np.inf
-    if ret_min_distance is None:
-        ret_min_distance = np.min(distances_copy)
-
-    return ret_max_distance, ret_min_distance
+DETECTION_STATS_NAME = "gripper_detection_stats.json"
 
 
 def save_gripper_distance_plot(gripper_distances_normalized, output_path):
     """
-    Create and save a time vs gripper distance plot.
+    Create and save a time vs normalized gripper distance plot.
 
     Args:
         gripper_distances_normalized (np.array): Normalized gripper distances
@@ -153,10 +108,11 @@ def save_gripper_range_plot(pooled_raw_distances, min_distance, max_distance, ou
 
 def detect_folder(data_folder: Path, at_detector, args) -> dict:
     """
-    Run AprilTag detection for a single folder and forward-fill gaps.
+    Run AprilTag detection (gripper_tag_core) for a single folder.
 
     Returns a dict with "status", "frame_count", "valid_detections", and
-    (on success) "raw_distances" (np.array of raw, unnormalized pixel distances).
+    (on success) "detection" (gripper_tag_core.EpisodeDetection) plus
+    "center" (episode symmetry center or None).
     """
     result = {
         "folder": str(data_folder),
@@ -181,51 +137,28 @@ def detect_folder(data_folder: Path, at_detector, args) -> dict:
         return result
 
     try:
-        image_nums = len(color_images)
-        result["frame_count"] = image_nums
-
-        gripper_distances = []
-        for color_image_path in tqdm(color_images, desc=f"  Frames", leave=False):
-            color_image = cv.imread(str(color_image_path))
-            if color_image is None:
-                gripper_distances.append(None)
-                continue
-            gripper_distance = detect_april_tag(
-                color_image, args.gripper_roi, at_detector,
-                args.left_tag_id, args.right_tag_id,
-                args.nominal_diag, args.threshold,
-                verbose=args.verbose
-            )
-            gripper_distances.append(gripper_distance)
-
-        gripper_distance_valid = [x for x in gripper_distances if x is not None]
-        result["valid_detections"] = len(gripper_distance_valid)
-
-        if not gripper_distance_valid:
+        result["frame_count"] = len(color_images)
+        det = detect_episode(
+            color_images, at_detector,
+            args.left_tag_id, args.right_tag_id,
+            args.nominal_diag, args.threshold, args.gripper_roi,
+            gripper_roi_bottom=args.gripper_roi_bottom,
+            left_window=tuple(args.left_tag_x_range) if getattr(args, "left_tag_x_range", None) else None,
+            right_window=tuple(args.right_tag_x_range) if getattr(args, "right_tag_x_range", None) else None,
+            preprocess_chain=() if args.no_preprocess else DEFAULT_PREPROCESS_CHAIN,
+        )
+        n_both = sum(1 for l, r in zip(det.left_xs, det.right_xs)
+                     if l is not None and r is not None)
+        n_left = sum(1 for l in det.left_xs if l is not None)
+        n_right = sum(1 for r in det.right_xs if r is not None)
+        result["valid_detections"] = max(n_left, n_right)
+        if max(n_left, n_right) == 0:
             result["status"] = "error"
             result["error"] = "No valid AprilTag detections"
             return result
-
-        # Fill gaps: leading missing frames take the first valid detection
-        # (nearest-in-time), interior/trailing gaps forward-fill from the
-        # previous frame. Seeding the head with the episode max (old behavior)
-        # amplified a single spurious detection into a long constant run that
-        # defeated both the median filter and the clustered-extremum check.
-        first_valid = gripper_distance_valid[0]
-        gripper_distances_processed = []
-        prev = first_valid
-        for x in gripper_distances:
-            if x is None:
-                gripper_distances_processed.append(prev)
-            else:
-                gripper_distances_processed.append(x)
-                prev = x
-
-        raw = np.asarray(gripper_distances_processed, dtype=float)
-        if args.median_filter > 1:
-            raw = medfilt(raw, kernel_size=args.median_filter)
-        result["raw_distances"] = raw
-
+        result["detection"] = det
+        print(f"  both={n_both}  left_only={n_left - n_both}  right_only={n_right - n_both}"
+              f"  preprocess_fallback={det.preprocess_frames}")
     except Exception as e:
         result["status"] = "error"
         result["error"] = str(e)
@@ -235,7 +168,7 @@ def detect_folder(data_folder: Path, at_detector, args) -> dict:
 
 def normalize_and_save_folder(
     data_folder: Path, raw_distances, min_distance, max_distance,
-    normalization_manifest,
+    normalization_manifest, detection_stats=None,
 ) -> None:
     """Scale raw distances and write outputs plus normalization provenance."""
     gripper_distances_normalized = (raw_distances - min_distance) / (max_distance - min_distance)
@@ -245,6 +178,9 @@ def normalize_and_save_folder(
     output_file = data_folder / "gripper_distances.txt"
     np.savetxt(output_file, gripper_distances_normalized)
     write_manifest(data_folder, normalization_manifest)
+    if detection_stats is not None:
+        with open(data_folder / DETECTION_STATS_NAME, 'w') as f:
+            json.dump(detection_stats, f, indent=2)
 
     plot_path = data_folder / "gripper_distances.jpg"
     save_gripper_distance_plot(gripper_distances_normalized, plot_path)
@@ -281,6 +217,7 @@ Examples:
     parser.add_argument("-i", "--input", required=True, help="Input directory containing data folders")
     parser.add_argument("--skip-existing", action="store_true", help="Skip folders that already have gripper_distances.txt")
     parser.add_argument("--gripper-roi", type=int, default=200, help="ROI for gripper detection (default: 200)")
+    parser.add_argument("--gripper-roi-bottom", type=int, default=None, help="Bottom ROI row (default: none)")
     parser.add_argument("--left-tag-id", type=int, default=0, help="AprilTag ID for left gripper (default: 0)")
     parser.add_argument("--right-tag-id", type=int, default=15, help="AprilTag ID for right gripper (default: 15)")
     parser.add_argument("--nominal-diag", type=int, default=42, help="Nominal diagonal distance for tag validation (default: 42)")
@@ -292,15 +229,40 @@ Examples:
         type=str,
         default=None,
         help="Optional JSON file with manual 'gripper_min_distance'/'gripper_max_distance' "
-             "overrides (both required to take effect). Skips auto-detection of the range.",
+        "overrides (both required to take effect). Skips auto-detection of the range.",
     )
     parser.add_argument(
         "--median-filter",
         type=int,
         default=1,
         help="Median filter window size applied to raw gripper distances before "
-             "computing min/max and normalizing, to smooth AprilTag detection noise "
-             "(must be odd, e.g. 3; default 1 = no filtering)",
+        "computing min/max and normalizing, to smooth AprilTag detection noise "
+        "(must be odd, e.g. 3; default 1 = no filtering)",
+    )
+    parser.add_argument(
+        "--interp",
+        choices=("linear", "forward_fill"),
+        default="linear",
+        help="Gap fill mode: linear interpolation with nearest edges (default) or "
+        "the legacy forward-fill (for A/B comparison)",
+    )
+    parser.add_argument(
+        "--no-preprocess",
+        action="store_true",
+        help="Disable the strong-light preprocessing fallback chain",
+    )
+    parser.add_argument(
+        "--no-symmetry",
+        action="store_true",
+        help="Disable the symmetric-jaw constraint (both-tag frames only, no "
+        "cross-validation, no single-tag mirror estimates)",
+    )
+    parser.add_argument(
+        "--spike-threshold",
+        type=float,
+        default=DEFAULT_SPIKE_THRESHOLD,
+        help=f"Flat-context spike removal threshold as a fraction of the gripper "
+             f"range (default {DEFAULT_SPIKE_THRESHOLD}); 0 disables removal",
     )
 
     args = parser.parse_args()
@@ -352,7 +314,7 @@ Examples:
         debug=0
     )
 
-    # Phase 1: detect raw distances for every folder
+    # Phase 1: detect raw tag positions for every folder
     all_results = []
     start_time = datetime.now()
 
@@ -368,15 +330,28 @@ Examples:
         else:
             print(f"  Error: {result.get('error', '')}")
 
-    # Phase 2: normalize with one shared min/max (manual override, else pooled
-    # clustered-extremum over every successfully-detected folder in this run)
+    # Phase 2: one shared min/max over the symmetry-constrained valid samples
+    # (manual override, else pooled clustered-extremum), then per-folder
+    # spike removal + gap interpolation + normalization
     detected = [r for r in all_results if r["status"] == "success"]
-    pooled = np.concatenate([r["raw_distances"] for r in detected]) if detected else None
+    run_center = run_center_fallback([r["detection"] for r in detected])
+    pooled_parts = []
+    for r in detected:
+        center = r["detection"].center_px
+        if center is None:
+            center = run_center
+        if args.no_symmetry:
+            center = None
+        indices, values, flags = r["detection"].series(center, tol=DEFAULT_SYMMETRY_TOL_PX)
+        if values:
+            pooled_parts.append(np.asarray(values, dtype=float))
+
+    pooled = np.concatenate(pooled_parts) if pooled_parts else None
     if manual_min is not None and manual_max is not None:
         min_distance, max_distance = manual_min, manual_max
         source_type = "manual_config"
         print(f"\nUsing manual gripper range from {args.config}: min={min_distance}, max={max_distance}")
-    elif detected:
+    elif pooled is not None and len(pooled_parts):
         source_type = "pooled_robust_extrema"
         max_distance, min_distance = find_distances_max_min(
             pooled,
@@ -384,7 +359,7 @@ Examples:
             threshold_num=ROBUST_EXTREMUM_MIN_SAMPLES,
         )
         print(
-            f"\nComputed gripper range from {len(detected)} folder(s): "
+            f"\nComputed gripper range from {len(pooled_parts)} folder(s): "
             f"min={min_distance}, max={max_distance}"
         )
     else:
@@ -396,6 +371,7 @@ Examples:
             "left_gripper_tag_id": args.left_tag_id,
             "right_gripper_tag_id": args.right_tag_id,
             "gripper_roi": args.gripper_roi,
+            "gripper_roi_bottom": args.gripper_roi_bottom,
             "nominal_diag_distance": args.nominal_diag,
             "threshold": args.threshold,
             "gripper_range_source": range_cfg.get("gripper_range_source"),
@@ -407,18 +383,45 @@ Examples:
             config_path=args.config,
             config=manifest_config,
             median_filter_size=args.median_filter,
-            episode_count=len(detected),
+            episode_count=len(pooled_parts),
             frame_count=len(pooled),
+            interp_mode=args.interp,
+            preprocess_chain=[] if args.no_preprocess else list(DEFAULT_PREPROCESS_CHAIN),
+            symmetry_enabled=not args.no_symmetry,
+            symmetry_tol_px=DEFAULT_SYMMETRY_TOL_PX,
+            spike_threshold=args.spike_threshold,
         )
         dist_plot_path = input_dir / "gripper_distance_distribution.png"
         save_gripper_range_plot(pooled, min_distance, max_distance, dist_plot_path)
         write_manifest(input_dir, normalization_manifest)
 
+        median_filter_fn = None
+        if args.median_filter > 1:
+            median_filter_fn = lambda a: medfilt(a, kernel_size=args.median_filter)
+
         for result in detected:
             folder = Path(result["folder"])
+            det = result.pop("detection")
+            center = det.center_px
+            if center is None:
+                center = run_center
+            if args.no_symmetry:
+                center = None
+            raw, stats = finalize_series(
+                det, min_distance, max_distance,
+                center=center, symmetry_tol=DEFAULT_SYMMETRY_TOL_PX,
+                interp_mode=args.interp,
+                spike_threshold=args.spike_threshold,
+                median_filter_fn=median_filter_fn,
+            )
+            if raw is None:
+                result["status"] = "error"
+                result["error"] = "No valid samples after cleanup"
+                continue
+            stats["interp_mode"] = args.interp
             normalize_and_save_folder(
-                folder, result.pop("raw_distances"), min_distance, max_distance,
-                normalization_manifest,
+                folder, raw, min_distance, max_distance,
+                normalization_manifest, detection_stats=stats,
             )
             result["min_distance"] = min_distance
             result["max_distance"] = max_distance
