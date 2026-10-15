@@ -13,14 +13,14 @@
     "_doc": "First-frame projection verdict and frame-jump threshold. The tip is treated as a static point in the camera frame; its world path is projected onto color_000000.png with the recorded intrinsics. VERDICT = end window only (see category rule); start window computed as evidence. HSV gates chosen by the 2026-10-16 corpus sweep (1138 eps): hue 10/160, s>=60, v>=60, n_red_min=200 catches 10/20 manual-bad with 1.9% false positives; the old RGB test both missed yellow-backboard cases and cannot be tuned to catch them.",
     "v_max_mm": 25.0,
     "r_start_px": 40,
-    "n_red_min": 300,
     "berry": {
-      "_doc": "Physical end-window model: berry = sphere of berry_diameter (40mm); the trajectory endpoint sits end_above_berry_top_m above the berry top, so the berry CENTER is 45mm below the endpoint. The window center is the projection of that 3D point (offset along image-down in the optical frame); the window radius is margin × berry radius, scaled by the intrinsics at that depth (near-big/far-small). Window centers are never clipped to the image: fully outside = ~0 red = fail.",
-      "end_above_berry_top_m": 0.025,
+      "_doc": "Physical end-window model: berry = sphere of berry_diameter (40mm); the PICK POINT (trajectory endpoint) sits end_above_berry_top_m above the berry top, so the berry CENTER is 35mm below the endpoint. Window center = projection of that 3D point (offset along image-down in the optical frame); radius = margin × berry radius scaled by the intrinsics at that depth (near-big/far-small). Pass bar = red_area_fraction × theoretical berry disc area at that depth (near → more pixels required, far → fewer). Window centers are never clipped: fully outside = ~0 red = fail.",
+      "end_above_berry_top_m": 0.015,
       "berry_radius_m": 0.02,
       "window_margin": 1.5,
       "window_r_min_px": 20,
-      "window_r_max_px": 100
+      "window_r_max_px": 100,
+      "red_area_fraction": 0.15
     },
     "red_hsv": {
       "_doc": "Red hue lives at both ends of the H circle; s/v gates reject white glare and dark shadow.",

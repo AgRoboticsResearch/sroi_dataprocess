@@ -102,17 +102,17 @@ GRIPPER_END_TAIL: int = 10
 # Projection verdict + frame-jump threshold (from cfg["projection"])
 V_MAX_MM: float = 25.0
 PROJ_R_START: int = 40      # evidence-only start window (fixed radius)
-PROJ_N_RED: int = 200
-# Physical end-window model (user, 2026-10-16): berry = 40mm sphere, endpoint
-# sits ~25mm above the berry top → berry CENTER is 45mm below the endpoint.
-# The window is placed by projecting that 3D point (offset along image-down in
-# the optical frame) and sized by the intrinsics at that depth — perspective
-# handles near-big/far-small automatically.
-BERRY_END_ABOVE_M: float = 0.025   # endpoint above berry top
+# Physical end-window model (user, 2026-10-16): berry = 40mm sphere, the pick
+# point (trajectory endpoint) sits 15mm above the berry top → berry CENTER is
+# 35mm below the endpoint. Window = projection of that 3D point; radius scaled
+# by the intrinsics at that depth. The red-pixel threshold is a FRACTION of
+# the theoretical berry disc area at that depth (near → more px, far → fewer).
+BERRY_END_ABOVE_M: float = 0.015   # pick point above berry top
 BERRY_RADIUS_M: float = 0.020      # 40mm-diameter berry
 WINDOW_MARGIN: float = 1.5         # window radius = margin × berry radius
 WINDOW_R_MIN_PX: int = 20
 WINDOW_R_MAX_PX: int = 100
+RED_AREA_FRACTION: float = 0.35    # pass needs red ≥ fraction × berry disc area
 RED_HUE1_MAX: int = 10
 RED_HUE2_MIN: int = 160
 RED_S_MIN: int = 60
@@ -150,7 +150,9 @@ def load_filters(path: Path | None = None) -> None:
     global STATIC_PATH_M, FLAT_GRIPPER_STD, MIN_TRAJ_FRAMES
     global EXTENT_PADDING_RATIO, EXTENT_PADDING_MIN_CM
     global GRIPPER_END_OPEN_THRESHOLD, GRIPPER_END_TAIL
-    global V_MAX_MM, PROJ_DY, PROJ_R_START, PROJ_R_END, PROJ_N_RED
+    global V_MAX_MM, PROJ_R_START
+    global BERRY_END_ABOVE_M, BERRY_RADIUS_M, WINDOW_MARGIN
+    global WINDOW_R_MIN_PX, WINDOW_R_MAX_PX, RED_AREA_FRACTION
     global RED_HUE1_MAX, RED_HUE2_MIN, RED_S_MIN, RED_V_MIN, EXTRINSICS_CONFIG
     global CATEGORY_COLORS, CATEGORY_DEFAULT_COLOR, PROBLEM_CATEGORIES, CATEGORY_SORT_ORDER
     global TRAJ_COLOR, GRIP_COLOR, PANEL_BG, GRIPPER_YLIM
@@ -181,13 +183,13 @@ def load_filters(path: Path | None = None) -> None:
     p = cfg.get("projection", {})
     V_MAX_MM = float(p.get("v_max_mm", 25.0))
     PROJ_R_START = int(p.get("r_start_px", 40))
-    PROJ_N_RED = int(p.get("n_red_min", 200))
     b = p.get("berry", {})
-    BERRY_END_ABOVE_M = float(b.get("end_above_berry_top_m", 0.025))
+    BERRY_END_ABOVE_M = float(b.get("end_above_berry_top_m", 0.015))
     BERRY_RADIUS_M = float(b.get("berry_radius_m", 0.020))
     WINDOW_MARGIN = float(b.get("window_margin", 1.5))
     WINDOW_R_MIN_PX = int(b.get("window_r_min_px", 20))
     WINDOW_R_MAX_PX = int(b.get("window_r_max_px", 100))
+    RED_AREA_FRACTION = float(b.get("red_area_fraction", 0.35))
     hsv = p.get("red_hsv", {})
     RED_HUE1_MAX = int(hsv.get("hue1_max", 10))
     RED_HUE2_MIN = int(hsv.get("hue2_min", 160))
@@ -247,6 +249,7 @@ class EpisodeQC:
     vmax_mm: float = 0.0
     red_start: int | None = None
     red_end: int | None = None
+    red_end_min: float | None = None
     # Raw arrays (only kept if keep_arrays=True on scan)
     pos: np.ndarray | None = field(default=None, repr=False)
     grip: np.ndarray | None = field(default=None, repr=False)
@@ -377,7 +380,7 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
     img_fp = episode_dir / "color_000000.png"
     info_fp = episode_dir / "camera_info_color.json"
     if not (HAVE_CV2 and img_fp.exists() and info_fp.exists() and EXTRINSICS_CONFIG):
-        return vmax, None, None
+        return vmax, None, None, None
     ext_path = Path(EXTRINSICS_CONFIG)
     if not ext_path.is_absolute():
         ext_path = Path(__file__).resolve().parent.parent / ext_path
@@ -386,7 +389,7 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         info = json.load(open(info_fp))
         img = cv2.imread(str(img_fp))
         if img is None:
-            return vmax, None, None
+            return vmax, None, None, None
         T_oc = np.array(ext["T_optical_camera"], dtype=float)[:3, :3]
         tip_link = np.array(ext["T_camera_gripper_tip"], dtype=float)[:3, 3]
         K = np.array(info["K"], dtype=float).reshape(3, 3)
@@ -401,7 +404,7 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         finite = np.isfinite(pts2d).all(axis=1)
         pts2d = pts2d[finite]
         if len(pts2d) < 2:
-            return vmax, None, None
+            return vmax, None, None, None
         m = _red_mask_hsv(img)
         # Start window (evidence only), fixed radius, center NOT clipped.
         sx, sy = pts2d[0]
@@ -421,14 +424,20 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         r_px = int(round(np.clip(WINDOW_MARGIN * fy * BERRY_RADIUS_M / max(berry[2], 1e-6),
                                  WINDOW_R_MIN_PX, WINDOW_R_MAX_PX)))
         red_end = _circle_count(m, int(round(bcx)), int(round(bcy)), r_px)
-        return vmax, red_start, red_end
+        # Depth-scaled threshold: a fixed pixel count would ask far more of a
+        # near berry (huge window) than a far one (tiny window). The pass bar
+        # is a fraction of the theoretical berry disc area at this depth.
+        r_berry_px = fy * BERRY_RADIUS_M / max(berry[2], 1e-6)
+        red_end_min = RED_AREA_FRACTION * np.pi * r_berry_px ** 2
+        return vmax, red_start, red_end, red_end_min
     except Exception:
-        return vmax, None, None
+        return vmax, None, None, None
 
 
 def classify(pos: np.ndarray | None, grip: np.ndarray | None,
              n_invalid_traj: int = 0, vmax_mm: float = 0.0,
-             red_start: int | None = None, red_end: int | None = None) -> str:
+             red_start: int | None = None, red_end: int | None = None,
+             red_end_min: float | None = None) -> str:
     """Task-level verdict. Evidence values ride along only to gate the checks
     that need them; every number is ALSO written to the CSV as evidence."""
     if pos is None or len(pos) < MIN_TRAJ_FRAMES or grip is None or len(grip) == 0:
@@ -445,7 +454,7 @@ def classify(pos: np.ndarray | None, grip: np.ndarray | None,
     # manual-bad — the hand usually starts away from fruit), while the end
     # window separates cleanly (manual-ok: ~2% below threshold). red_start
     # stays in the CSV as evidence.
-    if red_end is not None and red_end < PROJ_N_RED:
+    if red_end is not None and red_end < red_end_min:
         return "first_frame_projection"
     end = _gripper_end_value(grip)
     if end is not None and end > GRIPPER_END_OPEN_THRESHOLD:
@@ -460,10 +469,10 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
     grip = _load_gripper(episode_dir / "gripper_distances.txt")
     n_invalid = _load_ledger_invalid(episode_dir)
 
-    vmax_mm, red_start, red_end = 0.0, None, None
+    vmax_mm, red_start, red_end, red_end_min = 0.0, None, None, None
     if poses is not None and len(poses) >= 2:
-        vmax_mm, red_start, red_end = _projection_evidence(episode_dir, poses)
-    cat = classify(pos, grip, n_invalid, vmax_mm, red_start, red_end)
+        vmax_mm, red_start, red_end, red_end_min = _projection_evidence(episode_dir, poses)
+    cat = classify(pos, grip, n_invalid, vmax_mm, red_start, red_end, red_end_min)
 
     e = EpisodeQC(
         session=episode_dir.parent.name,
@@ -480,6 +489,7 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
         vmax_mm=vmax_mm,
         red_start=red_start,
         red_end=red_end,
+        red_end_min=round(red_end_min, 1) if red_end_min is not None else None,
     )
     if grip is not None and len(grip):
         finite = grip[np.isfinite(grip)]
@@ -514,7 +524,7 @@ def scan_sessions(root: Path, pattern: str = "*-png", keep_arrays: bool = True) 
 CSV_FIELDS = ["session", "episode", "category",
               "path_length_cm", "xy_span_cm", "z_span_cm", "n_traj_frames",
               "n_nan_gripper", "n_grip_frames", "gripper_std", "gripper_range",
-              "gripper_end", "n_invalid_traj", "vmax_mm", "red_start", "red_end",
+              "gripper_end", "n_invalid_traj", "vmax_mm", "red_start", "red_end", "red_end_min",
               "path"]
 
 
