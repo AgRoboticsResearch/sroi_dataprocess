@@ -1,6 +1,5 @@
-# Requirements for extract_stereo_rosbags.py
-# Modern rosbags library for ROS1/ROS2 bag file processing
-rosbags>=0.9.0
+# Requirements for the SROI data-processing pipeline
+# (recording / decoding / AprilTag gripper recovery)
 
 # Computer vision and image processing
 opencv-python>=4.5.0

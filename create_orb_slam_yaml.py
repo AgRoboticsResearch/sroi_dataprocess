@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Create ORB-SLAM YAML configuration files based on extracted camera information.
-This script reads camera info JSONs from extract_stereo_rosbags.py output and 
-generates a customized ORB-SLAM YAML configuration file.
+This script reads the `camera_info_{left,right}.json` files from a session/episode
+folder and generates a customized ORB-SLAM YAML configuration file.
 """
 
 import json
@@ -181,11 +181,16 @@ def create_orb_slam_yaml(camera_info: Dict[str, Any], template_path: str, output
 
 def main():
     parser = argparse.ArgumentParser(description="Create ORB-SLAM YAML from extracted camera info")
-    parser.add_argument("output_folder", help="Output folder from extract_stereo_rosbags.py")
+    parser.add_argument("output_folder", help="Session/episode folder holding camera_info_{left,right}.json")
     parser.add_argument("camera_type", choices=["realsense_d435i"], 
                        help="Camera type (currently only realsense_d435i is supported)")
-    parser.add_argument("--template_dir", default="/home/zfei/codes/sroi/sroi_rosbag_utilities/orb_slam_yaml",
-                       help="Directory containing template YAML files")
+    # Default to the templates shipped in this repo (resolved relative to this
+    # file, so it works wherever the repo is checked out). Pass --template_dir
+    # only to override with a different rig's template dir.
+    parser.add_argument("--template_dir",
+                       default=str(Path(__file__).resolve().parent / "orb_slam_yaml"),
+                       help="Directory containing template YAML files "
+                            "(default: <repo>/orb_slam_yaml)")
     
     args = parser.parse_args()
     

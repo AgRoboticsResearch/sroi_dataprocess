@@ -4,7 +4,7 @@ RealSense Stereo IR + Color Recorder
 
 Records synchronized stereo infrared and color frames from a RealSense camera
 (D435i or D405) using pyrealsense2. Output is directly compatible with the
-ORB-SLAM pipeline (orbslam_batch.sh, transform_trajectory.py, sroi_to_lerobot.py).
+ORB-SLAM pipeline (orbslam_batch_local.sh, transform_trajectory.py, sroi_to_lerobot.py).
 
 Controls (in GUI or headless terminal):
     r - Start recording a new episode
@@ -149,8 +149,8 @@ def get_extrinsics(pipeline_profile, from_stream, from_idx, to_stream, to_idx):
 def make_camera_info(intrinsics, width, height, baseline_tx=0.0):
     """Convert pyrealsense2 intrinsics to ROS camera_info JSON format.
 
-    This matches the format produced by extract_stereo_rosbags.py and
-    consumed by create_orb_slam_yaml.py.
+    This matches the ROS camera_info JSON format consumed by
+    create_orb_slam_yaml.py.
     """
     return {
         "height": height,

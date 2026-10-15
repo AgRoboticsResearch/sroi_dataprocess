@@ -96,10 +96,6 @@ batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM
 batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM3 \
     true false --mask-config configs/gripper_mask_sroi_v2_d405.json --jobs 8
 
-# Inside the ORB_SLAM3 Docker container (masked)
-./batches/orbslam_batch_d405.sh ~/Desktop/435/20260520_143052-png true false \
-    --mask-config /codes/sroi_rosbag_utilities/configs/gripper_mask_sroi_v2_d405.json
-
 # Unmasked run (NOT what the datasets use — legacy/ablation only)
 batches/orbslam_batch_local.sh ~/Desktop/435/20260520_143052-png ~/code/ORB_SLAM3
 ```
@@ -115,7 +111,7 @@ Mask JSON files define the expected image size, per-eye polygons, and an optiona
 full-width `black_below_row`. The mask affects only the stereo trajectory; the
 color-based AprilTag gripper signal (Step 5) is never masked. Use a different config for
 a different gripper/camera assembly; `configs/gripper_mask_sroi_v2_d405.json` contains
-the current 640x480 D405 geometry. See [`doc/rig_configs.md`](doc/rig_configs.md) for the
+the current 640x480 D405 geometry. See [`design/rig_configs.md`](design/rig_configs.md) for the
 schema, validation rules, temporary-file behavior, and instructions for adding another
 rig.
 
@@ -185,7 +181,7 @@ python visualization/visualize_traj_video.py /path/to/session-png --recursive \
 
 Use a different extrinsics config for a different camera/gripper assembly.
 The matrix convention and calibration checks are documented in
-[`doc/rig_configs.md`](doc/rig_configs.md).
+[`design/rig_configs.md`](design/rig_configs.md).
 
 For reviewing a QC'd tree, pass `--qc-csv` (requires `--output`) to render every
 episode into one folder with its QC category as a colored on-video badge and a
@@ -205,7 +201,7 @@ python lerobot/sroi_to_lerobot.py \
     --data_path ~/Desktop/435/20260520_143052-png \
     --repo_id sroi/lab_picking \
     --fps 30 \
-    --root /mnt/data0/data/sroi/sroi_lab_picking \
+    --root /path/to/lerobot_datasets/sroi_lab_picking \
     --task "pick the red strawberry"
 ```
 
@@ -235,7 +231,7 @@ python lerobot/sroi_to_lerobot.py \
     --data_path /path/to/day \
     --repo_id sroi/lab_picking \
     --fps 30 \
-    --root /mnt/data0/data/sroi/sroi_lab_picking \
+    --root /path/to/lerobot_datasets/sroi_lab_picking \
     --task "pick the red strawberry" \
     --qc_csv /path/to/day/qc.csv \
     --qc_categories ok \
@@ -258,8 +254,8 @@ It needs the `py310` conda env (placo) and the `sroi-piper` submodule URDF
 (initialize it once from the lerobot checkout: `git submodule update --init sroi-piper`):
 
 ```bash
-# From the repo root, py310 interpreter:
-/home/zfei/anaconda3/envs/py310/bin/python visualization/ik_feasibility.py \
+# From the repo root, with the py310 interpreter (placo lives only there):
+python visualization/ik_feasibility.py \
     /path/to/day -o /path/to/day/ik_feasibility
 ```
 
@@ -277,7 +273,7 @@ python lerobot/sroi_to_lerobot.py \
     --data_path /path/to/day \
     --repo_id sroi/lab_picking \
     --fps 30 \
-    --root /mnt/data0/data/sroi/sroi_lab_picking \
+    --root /path/to/lerobot_datasets/sroi_lab_picking \
     --task "pick the red strawberry" \
     --qc_csv /path/to/day/ik_feasibility.csv \
     --qc_categories ik_ok
@@ -295,15 +291,15 @@ datasets into one dataset. The official checkout currently needs the `py312`
 conda environment and its source tree on `PYTHONPATH`:
 
 ```bash
-cd /home/zfei/code/lerobots/lerobot_official
+cd /path/to/lerobot_official        # a checkout of the official LeRobot repo
 
-PYTHONPATH=/home/zfei/code/lerobots/lerobot_official/src \
-/home/zfei/anaconda3/envs/py312/bin/python -m lerobot.scripts.lerobot_edit_dataset \
-    --new_repo_id sroi/sroi_v2_merged_official \
-    --new_root /mnt/data1/data/lerobot/sroi_v2_merged_official \
+PYTHONPATH=/path/to/lerobot_official/src \
+python -m lerobot.scripts.lerobot_edit_dataset \
+    --new_repo_id <owner>/<merged_dataset> \
+    --new_root /path/to/lerobot_datasets/<merged_dataset> \
     --operation.type merge \
-    --operation.repo_ids "['sroi/lerobot_sroi_v2', 'sroi/sroi_v2_20260611']" \
-    --operation.roots "['/mnt/data1/data/lerobot/lerobot_sroi_v2', '/mnt/data1/data/lerobot/sroi_v2_20260611']"
+    --operation.repo_ids "['<owner>/<dataset_a>', '<owner>/<dataset_b>']" \
+    --operation.roots "['/path/to/lerobot_datasets/<dataset_a>', '/path/to/lerobot_datasets/<dataset_b>']"
 ```
 
 `--operation.repo_ids` labels the input datasets; `--operation.roots` provides
@@ -314,58 +310,11 @@ command.
 
 ---
 
-## Pipeline B: ROS Bag → LeRobot (Legacy)
-
-Process pre-recorded ROS bag files.
-
-### Step 1: Segment ROS Bags
-
-```bash
-python rosbag_segment.py input.bag -o /path/to/output
-```
-
-### Step 2: Extract Images from Bags
-
-```bash
-python3 extract_stereo_rosbags.py /path/to/bag.bag /output/folder/ realsense_d435i --compressed
-```
-
-### Step 3: Create ORB-SLAM Config (D435i from bags only)
-
-```bash
-python3 create_orb_slam_yaml.py /output/folder/ realsense_d435i
-```
-
-### Step 4: Extract Gripper
-
-```bash
-python gripper_estimation_april_tag.py /output/folder/
-```
-
-Then continue with ORB-SLAM3 (Step 3 in Pipeline A) and follow remaining steps.
-
----
-
-## Pipeline B′: SROI v1 ROS1 bags → v2 data (conversion)
-
-For the recorded v1 corpus (`oak_d_sr` + `realsense_d435i` rigs, e.g.
-`/mnt/data1/sroi/sroi_v1`): `v1_to_v2/convert_v1_bags.py` converts the bags
-into v2-style sessions — camera_info always from the bag (explicit fallback +
-`CALIBRATION_NOTE.txt` for the dec-2024 oak bags that lack it, resolution
-checked against the pixels), per-episode EuRoC `imu.txt`, and the tf_static
-extrinsics. The full-corpus run uses `--mp4-only` (PNG trees would need
-~265 GiB); PNG trees are regenerated per batch with `decode_videos.py`.
-The complete runbook — dry-run, full command, resume, verification,
-regenerating PNG trees — lives in `v1_to_v2/README.md`.
-
----
-
 ## Dependencies
 
 ```bash
 pip install pyrealsense2 opencv-python numpy tqdm pupil-apriltags scipy PyYAML
 pip install av  # for --encode-video and decode_videos.py
-pip install rosbags  # for extract_stereo_rosbags.py (Pipeline B)
 pip install lerobot  # for sroi_to_lerobot.py
 pip install plotly matplotlib  # for visualization tools
 ```

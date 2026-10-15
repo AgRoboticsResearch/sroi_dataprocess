@@ -22,13 +22,7 @@ option comes after the existing positional arguments:
 batches/orbslam_batch_local.sh /path/to/session-png ~/code/ORB_SLAM3 \
     true false --mask-config configs/gripper_mask_sroi_v2_d405.json
 
-# D405 batch inside the ORB-SLAM3 container
-batches/orbslam_batch_d405.sh /path/to/session-png \
-    true false --mask-config /codes/sroi_rosbag_utilities/configs/gripper_mask_sroi_v2_d405.json
-
-# Legacy D435i segment batch inside the container
-batches/orbslam_batch.sh /path/to/segments \
-    false false --mask-config /path/to/matching-rig-mask.json
+# D435i / other rigs: copy the D405 config, change the geometry, pass it the same way
 ```
 
 When masking is enabled, each episode is processed as follows:
@@ -96,7 +90,7 @@ the transform calibration explicitly when processing a rig:
 python visualization/visualize_traj_video.py /path/to/session-png --recursive \
     --extrinsics-config configs/camera_gripper_extrinsics_sroi_v2_d405.json
 
-python schemes_compare/viz_scheme_compare.py /path/to/session-schemes \
+python experiments/mask_schemes/viz_scheme_compare.py /path/to/session-schemes \
     --extrinsics-config configs/camera_gripper_extrinsics_sroi_v2_d405.json
 ```
 

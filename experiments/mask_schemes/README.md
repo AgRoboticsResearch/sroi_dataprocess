@@ -11,15 +11,12 @@ step. Existing commands remain unmasked. Pass a rig-specific config to enable ma
 ```bash
 batches/orbslam_batch_local.sh <session> <orbslam-dir> true false \
     --mask-config configs/gripper_mask_sroi_v2_d405.json
-
-batches/orbslam_batch_d405.sh <session> true false \
-    --mask-config configs/gripper_mask_sroi_v2_d405.json
 ```
 
 The batch creates temporary masked stereo frames, runs ORB on them, copies the trajectory
 back to the original episode, and removes the temporary input. Source images are never
 modified. The mask and extrinsics schemas are documented in
-[`../doc/rig_configs.md`](../doc/rig_configs.md). The other scripts in this directory
+[`../../design/rig_configs.md`](../../design/rig_configs.md). The other scripts in this directory
 remain useful for multi-scheme experiments.
 
 ## Preliminary experiment findings
@@ -49,7 +46,7 @@ produce high-contrast moving features that violate ORB-SLAM's static-scene assum
 
 Apply the per-eye gripper mask before running ORB-SLAM:
 ```bash
-python3 schemes_compare/mask_gripper_trapezoid.py <schemes/session/episode-directory> \
+python3 experiments/mask_schemes/mask_gripper_trapezoid.py <schemes/session/episode-directory> \
     --config configs/gripper_mask_sroi_v2_d405.json
 ```
 
@@ -67,20 +64,20 @@ Mask geometry for the validated 640x480 D405 rigs:
 
 ```bash
 # 1) Build raw/maskhalf/maskgripper trees and run ORB for each scheme
-MASK_DATA=/path/to/data bash schemes_compare/build_session_schemes.sh 20260709_XXXXXX
+MASK_DATA=/path/to/data bash experiments/mask_schemes/build_session_schemes.sh 20260709_XXXXXX
 
 # 2) Transform each scheme trajectory for RGB projection
 python3 transform_trajectory.py <session>-schemes --recursive
 
 # 3) Render side-by-side comparison videos with this rig's extrinsics
-python3 schemes_compare/viz_scheme_compare.py <session>-schemes \
+python3 experiments/mask_schemes/viz_scheme_compare.py <session>-schemes \
     --extrinsics-config configs/camera_gripper_extrinsics_sroi_v2_d405.json
 
 # 4) Calculate completeness and deviation against maskhalf
-python3 schemes_compare/deviation_vs_baseline.py <session>-schemes
+python3 experiments/mask_schemes/deviation_vs_baseline.py <session>-schemes
 
 # 5) Aggregate results across sessions
-python3 schemes_compare/aggregate_schemes.py /path/to/data
+python3 experiments/mask_schemes/aggregate_schemes.py /path/to/data
 ```
 
 Outputs are written under `<session>-schemes/_compare/`.

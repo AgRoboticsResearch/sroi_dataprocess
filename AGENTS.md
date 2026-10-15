@@ -6,12 +6,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 This repo is a collection of standalone Python scripts (plus shell batches and configs) that form the **SROI robot data pipeline**: record RealSense stereo IR + color → run ORB-SLAM3 → transform camera trajectory → extract gripper distance from AprilTags → convert everything to a LeRobot v3.0 training dataset. There is no package, build system, or test suite — each script is invoked directly from the repo root.
 
-The pipeline has two entry points:
+The single entry point is **direct recording** (`record_realsense.py`): live capture from a D405/D435i camera. The legacy ROS-bag path (`rosbag_segment.py`, `extract_stereo_rosbags.py`, `extract_rgbd/`, `v1_to_v2/`) has been removed.
 
-- **Pipeline A — Direct recording** (`record_realsense.py`): live capture from a D405/D435i camera. This is the primary path for new data.
-- **Pipeline B — Legacy ROS bags** (`extract_stereo_rosbags.py`): convert pre-recorded `.bag` files. Steps 2+ are shared.
-
-The canonical end-to-end recipe lives in `README.md` (Pipeline A: Step 1 record → decode → ORB-SLAM3 → transform → gripper → LeRobot). Read it first before running anything.
+The canonical end-to-end recipe lives in `README.md` (record → decode → ORB-SLAM3 → transform → gripper → LeRobot). Read it first before running anything.
 
 ## Key commands
 
@@ -28,8 +25,6 @@ python decode_videos.py <input> --recursive -o /path/to/output
 # Run ORB-SLAM3 on every episode
 # Host install (e.g. ~/code/ORB_SLAM3) — pass the install dir explicitly:
 batches/orbslam_batch_local.sh /path/to/session-png ~/code/ORB_SLAM3 [skip_existing=true] [visualization=false] [--mask-config PATH]
-# Inside the ORB_SLAM3 Docker container (hardcoded /ORB_SLAM3 paths):
-batches/orbslam_batch_d405.sh /path/to/session-png [skip_existing=true] [visualization=false] [--mask-config PATH]
 
 # Render trajectory projection using the matching camera/gripper extrinsics
 python visualization/visualize_traj_video.py /path/to/session-png --recursive \
@@ -56,15 +51,6 @@ python lerobot/sroi_to_lerobot.py \
     --task "pick the red strawberry"
 ```
 
-### Legacy (Pipeline B)
-
-```bash
-python rosbag_segment.py input.bag -o /path/to/output
-python extract_stereo_rosbags.py /path/to/bag.bag /output/folder/ realsense_d435i --compressed
-python create_orb_slam_yaml.py /output/folder/ realsense_d435i
-# then continue from ORB-SLAM3 above
-```
-
 ## Architecture notes that span multiple files
 
 ### Session / episode layout (shared convention)
@@ -89,7 +75,7 @@ All steps agree on this on-disk shape and use the suffixes to know which step a 
 `record_realsense.py` is more than a recorder: it also writes the ORB-SLAM YAML for the recorded camera (D405 uses fixed calibration, D435i uses live calibration), so the ORB-SLAM step is fully driven by recording output. Switching cameras (D405 vs D435i) requires the matching `configs/sroi_v*.json` for gripper estimation and a different `batches/orbslam_batch_*.sh` — don't mix them.
 
 ### Rig-specific mask and projection configs
-Gripper masking is opt-in in the standard ORB batch scripts. Passing `--mask-config` creates temporary masked stereo frames, runs ORB-SLAM3 on them, copies `CameraTrajectory.txt` back to the original episode, and removes the temporary input; source images are not changed. Omitting the option preserves the original unmasked path. Projection visualization separately loads camera-to-gripper-tip transforms through `--extrinsics-config`. The supplied SROI v2 D405 files are `configs/gripper_mask_sroi_v2_d405.json` and `configs/camera_gripper_extrinsics_sroi_v2_d405.json`; use matching files for another physical rig. Schema and validation details are in `doc/rig_configs.md`.
+Gripper masking is opt-in in the standard ORB batch scripts. Passing `--mask-config` creates temporary masked stereo frames, runs ORB-SLAM3 on them, copies `CameraTrajectory.txt` back to the original episode, and removes the temporary input; source images are not changed. Omitting the option preserves the original unmasked path. Projection visualization separately loads camera-to-gripper-tip transforms through `--extrinsics-config`. The supplied SROI v2 D405 files are `configs/gripper_mask_sroi_v2_d405.json` and `configs/camera_gripper_extrinsics_sroi_v2_d405.json`; use matching files for another physical rig. Schema and validation details are in `design/rig_configs.md`.
 
 ### Encoding modes trade off disk vs memory
 `record_realsense.py` defaults to PNG. `--encode-video` writes MP4 (smallest, requires `av`). Three encoding paths:
@@ -98,7 +84,7 @@ Gripper masking is opt-in in the standard ORB batch scripts. Passing `--mask-con
 - **MP4 from RAM** (`--encode-video --mem`): keep frames in memory, skip the disk round-trip (faster, watch memory on long episodes).
 - **MP4 in realtime** (`--encode-video --realtime-encoding`): background encoder threads consume frames during recording. Useful on the Pi where end-of-episode blocking disrupts the control loop.
 
-`--status-file <path>` writes a JSON status blob (state/episode/frame/fps/format) atomically every ~1 s for an external UI to poll. See `doc/video_encoding_approaches.md` for the design comparison against lerobot upstream encoders.
+`--status-file <path>` writes a JSON status blob (state/episode/frame/fps/format) atomically every ~1 s for an external UI to poll. See `experiments/video_encoding_approaches.md` for the design comparison against lerobot upstream encoders.
 
 ### `record_realsense.py` is shared with the UPI repo
 The canonical recorder lives at `/home/zfei/code/UPI/raspberry_pi/upi_python/record_realsense.py` (deployed on the Pi). The copy in this repo is synced from there — when changing recorder behavior, update UPI first and copy across, or the two will drift.
@@ -106,24 +92,20 @@ The canonical recorder lives at `/home/zfei/code/UPI/raspberry_pi/upi_python/rec
 ### What feeds LeRobot
 `lerobot/sroi_to_lerobot.py` reads three things per episode — `CameraTrajectoryTransformed.txt` (4x4 poses → `ee.xyz` + `ee.wx,wy,wz` rotvec), `gripper_distances.txt`, and `color_*.png`/`color_*.jpg` — and emits a LeRobot v3.0 dataset with a fixed feature schema (`observation.images.camera` video + `action` 7-vector; `observation.state` is intentionally omitted/derived downstream). It accepts a single episode dir, one session dir, or a parent folder containing many decoded `*-png` sessions. Use `--episodes` only for single-session subsetting; use `--qc_csv` + `--qc_categories` to filter episodes across sessions and build one unified dataset. Schema and examples are documented in `lerobot/README.md`.
 
-### Two LeRobot converters exist
-- `lerobot/sroi_to_lerobot.py` — main converter for SROI camera-trajectory data (Pipeline A/B output).
-- `piper_sroi_convert/convert_to_lerobot.py` — for Piper arm data where the trajectory is already in end-effector space (`EETrajectory.txt`, 12 floats/line). It uses the upstream `lerobot` package layout and a different input shape; do not substitute one for the other.
-
-### `misc/` — one-off repair scripts
-`misc/fix_d405_baseline.py` and `misc/regenerate_d405_yaml.py` repair legacy D405 recordings where the stereo baseline was written 1000× too small (pyrealsense2 returns mm; an older recorder treated it as m, so ORB-SLAM3 saw a ~50-micron baseline and the trajectory collapsed to identity). The recorder is now patched with a sanity check, so newly-recorded data is fine — these scripts exist for the pre-fix corpus. Both are idempotent. Run `fix_d405_baseline.py` first; if its first-pass `yaml.dump()` mangled the OpenCV YAML format (stripped `!!opencv-matrix`), run `regenerate_d405_yaml.py` to rebuild the yaml from `camera_info_{left,right}.json`.
+### The LeRobot converter
+`lerobot/sroi_to_lerobot.py` is the only converter — for SROI camera-trajectory data.
+(The Piper-arm converter that used to live in `piper_sroi_convert/` has been removed.)
 
 ### QC tool reads ORB-SLAM + gripper outputs
 `visualization/qc.py` scans a session tree and emits a per-episode CSV plus a multi-page PDF (summary table + one page per session). It classifies each episode as `ok`, `static`, `flat_gripper`, `no_gripper`, `no_traj`, or `all_nan_gripper`, color-codes by category, sorts problem episodes to the top, and uses a shared xy scale for trajectory plots. QC thresholds, colors, category priority/problem flags, and layout settings live in `configs/qc_filters.json` (override with `--filters`). The PDF/CSV are idempotent — safe to re-run as data updates. The resulting `qc.csv` can be passed to `lerobot/sroi_to_lerobot.py --qc_csv ... --qc_categories ok` to filter training data.
 
 ## Dependencies
 
-There is no `setup.py`/`pyproject.toml`; install per-script as needed. `requirements.txt` covers only `extract_stereo_rosbags.py`. The complete set is in `README.md`:
+There is no `setup.py`/`pyproject.toml`; install per-script as needed. `requirements.txt` covers the pipeline's own dependencies. The complete set is in `README.md`:
 
 ```bash
 pip install pyrealsense2 opencv-python numpy tqdm pupil-apriltags scipy PyYAML
 pip install av            # for --encode-video and decode_videos.py
-pip install rosbags       # for extract_stereo_rosbags.py (Pipeline B)
 pip install lerobot       # for sroi_to_lerobot.py
 pip install plotly matplotlib   # visualization tools
 ```
@@ -132,6 +114,5 @@ The LeRobot converter auto-adds its local `lerobot/` package to `sys.path` when 
 
 ## Repo quirks
 
-- `batches/orbslam_batch_d405.sh` and `orbslam_batch.sh` assume the ORB_SLAM3 Docker container (`/ORB_SLAM3` paths); `orbslam_batch_local.sh` takes the install dir as `$2` and runs on the host.
-- `extract_rgbd/` and `notebooks/` contain older/experimental variants and Jupyter scratch — prefer the top-level scripts for new work.
-- The host ORB_SLAM3 install lives at `/home/zfei/code/ORB_SLAM3`; `stereo_kitti` is invoked directly when using the local batch.
+- ORB-SLAM3 runs from a **host** install built from source; the old Docker-container batches (`orbslam_batch.sh`, `orbslam_batch_d405.sh`) were removed. `batches/orbslam_batch_local.sh` takes the install dir as `$2`.
+- The host ORB_SLAM3 install lives at `~/code/ORB_SLAM3`; `stereo_kitti` is invoked directly when using the local batch. It is an official clone plus our local patch — see `patches/README.md`.
