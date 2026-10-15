@@ -368,7 +368,7 @@ def create_lerobot_dataset(
         qc_csv: Optional path to a qc.csv from visualization/qc.py. Episodes are
             filtered per session to those whose category is in qc_categories.
         qc_categories: Comma-separated category names to keep when qc_csv is set
-            (default: "ok"). E.g. "ok,flat_gripper" to also keep no-actuation runs.
+            (default: "ok"). E.g. "ok,traj_long_gap" to also keep long-gap runs.
         trim_start: Drop the quasi-static head frames of each episode (see
             find_start_trim_count). Counts are recorded in meta/start_trim.json.
     """
@@ -666,7 +666,7 @@ def main():
         type=str,
         default="ok",
         help="Comma-separated QC categories to keep when --qc_csv is set (default: 'ok'). "
-             "Example: 'ok,flat_gripper'."
+             "Example: 'ok,traj_long_gap'."
     )
     parser.add_argument(
         "--no_trim_start",

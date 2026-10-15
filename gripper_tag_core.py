@@ -1,7 +1,7 @@
 """Shared gripper-tag detection and series-recovery core.
 
 Used by gripper_estimation_april_tag.py (config-driven CLI) and
-batches/gripper_estimation_batch_d405.py (flag-driven batch CLI), so both
+gripper_estimation_april_tag.py (flag-driven CLI), so both
 entry points share one implementation of:
 
   * per-frame AprilTag detection with a preprocessing fallback chain
