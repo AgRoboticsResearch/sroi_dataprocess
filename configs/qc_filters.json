@@ -12,12 +12,12 @@
   },
 
   "projection": {
-    "_doc": "First-frame projection verdict (strawberry near start tip / below end point) and frame-jump threshold. The tip is treated as a static point in the camera frame; its world path is projected onto color_000000.png with the recorded intrinsics. Red detection is HSV-based (the old RGB test had yellow false positives).",
+    "_doc": "First-frame projection verdict and frame-jump threshold. The tip is treated as a static point in the camera frame; its world path is projected onto color_000000.png with the recorded intrinsics. VERDICT = end window only (see category rule); start window computed as evidence. HSV gates chosen by the 2026-10-16 corpus sweep (1138 eps): hue 10/160, s>=60, v>=60, n_red_min=200 catches 10/20 manual-bad with 1.9% false positives; the old RGB test both missed yellow-backboard cases and cannot be tuned to catch them.",
     "v_max_mm": 25.0,
     "dy_px": 35,
     "r_start_px": 40,
     "r_end_px": 40,
-    "n_red_min": 150,
+    "n_red_min": 200,
     "red_hsv": {
       "_doc": "Red hue lives at both ends of the H circle; s/v gates reject white glare and dark shadow.",
       "hue1_max": 10,
@@ -63,8 +63,8 @@
       "color": "#6a1b9a",
       "problem": true,
       "priority": 4,
-      "rule": "red-pixel count in circle around projected tip at frame 0, or below the projected end point, < projection.n_red_min",
-      "description": "No strawberry found at the start tip and/or below the end point (wrong trajectory or bad demo)"
+      "rule": "red-pixel count in the circle below the projected end point (on the first color frame) < projection.n_red_min. VERDICT USES THE END WINDOW ONLY — corpus sweep showed the start near-tip window has no discriminative power (median 0 for both good and bad); red_start stays as an evidence column",
+      "description": "No strawberry below the trajectory end point (wrong trajectory or bad demo). 'Berry present in the first frame' remains a MANUAL judgment"
     },
     "gripper_not_closed": {
       "color": "#00838f",

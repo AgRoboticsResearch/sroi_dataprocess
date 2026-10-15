@@ -80,7 +80,7 @@ bash batches/convert_batch.sh <data root> <repo_id> [out root] [--qc-csv <qc.csv
 | `traj_long_gap` | ledger contains `invalid` rows (tracking loss beyond gap_max_frames) |
 | `gripper_missing` | gripper_distances.txt contains ANY NaN (including all-NaN) |
 | `traj_frame_jump` | per-frame step of the SMOOTHED trajectory above projection.v_max_mm |
-| `first_frame_projection` | no strawberry found near the projected start tip and/or below the projected end point on the first color frame (HSV red detection) |
+| `first_frame_projection` | no strawberry below the projected end point on the first color frame (HSV red, count < n_red_min=200). END WINDOW ONLY — a full-corpus sweep showed the start near-tip window has no discriminative power (median 0 for both good and bad); red_start stays as evidence, and "berry present in the first frame" remains a manual judgment |
 | `gripper_not_closed` | mean of the last N finite gripper readings above threshold (still open) |
 | `ok` | all checks passed |
 

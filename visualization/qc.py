@@ -416,8 +416,12 @@ def classify(pos: np.ndarray | None, grip: np.ndarray | None,
         return "gripper_missing"
     if vmax_mm > V_MAX_MM:
         return "traj_frame_jump"
-    if red_start is not None and red_start < PROJ_N_RED:
-        return "first_frame_projection"
+    # Verdict uses the END window only: parameter sweeps over the whole corpus
+    # (1138 episodes, 2026-10-16) showed the START near-tip window has no
+    # discriminative power (median 0 red pixels for BOTH manual-ok and
+    # manual-bad — the hand usually starts away from fruit), while the end
+    # window separates cleanly (manual-ok: ~2% below threshold). red_start
+    # stays in the CSV as evidence.
     if red_end is not None and red_end < PROJ_N_RED:
         return "first_frame_projection"
     end = _gripper_end_value(grip)

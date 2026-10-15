@@ -36,10 +36,18 @@ fi
 
 [ -d "$DATA_ROOT" ] || { echo "Error: data root '$DATA_ROOT' not found" >&2; exit 1; }
 
-DEFAULTS=(--fps 30 --qc-csv "$REPO_DIR/qc.csv")
-# Prefer a qc.csv next to the data root if present
+DEFAULTS=()
+# Default QC filter: prefer a qc.csv next to the data root, else the repo root
+QC_DEFAULT=""
 if [ -f "$DATA_ROOT/qc.csv" ]; then
-    DEFAULTS=(--fps 30 --qc-csv "$DATA_ROOT/qc.csv")
+    QC_DEFAULT="$DATA_ROOT/qc.csv"
+elif [ -f "$REPO_DIR/qc.csv" ]; then
+    QC_DEFAULT="$REPO_DIR/qc.csv"
+fi
+if [ -n "$QC_DEFAULT" ]; then
+    DEFAULTS=(--fps 30 --qc_csv "$QC_DEFAULT")
+else
+    DEFAULTS=(--fps 30)
 fi
 
 EXTRA=()
@@ -47,7 +55,7 @@ for a in "$@"; do
     EXTRA+=("$a")
 done
 
-# Drop the default --qc-csv if caller passed their own or --no-qc
+# Drop the default --qc_csv if caller passed their own or --no-qc
 for a in "$@"; do
     case "$a" in
         --qc-csv|--qc_csv|--no-qc) DEFAULTS=();;
