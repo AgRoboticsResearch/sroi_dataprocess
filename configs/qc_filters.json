@@ -1,7 +1,6 @@
 {
   "_doc": "Filter rules for visualization/qc.py — the single source of truth for thresholds, category metadata, colors, and page layout. qc.py loads this at startup; edit values here instead of editing the script. Pass --filters <path> to override per-run.",
   "version": 4,
-
   "thresholds": {
     "_doc": "Numeric cutoffs used by classify() and the extent computation.",
     "min_traj_frames": 30,
@@ -10,14 +9,19 @@
     "extent_padding_ratio": 0.05,
     "extent_padding_min_cm": 0.5
   },
-
   "projection": {
     "_doc": "First-frame projection verdict and frame-jump threshold. The tip is treated as a static point in the camera frame; its world path is projected onto color_000000.png with the recorded intrinsics. VERDICT = end window only (see category rule); start window computed as evidence. HSV gates chosen by the 2026-10-16 corpus sweep (1138 eps): hue 10/160, s>=60, v>=60, n_red_min=200 catches 10/20 manual-bad with 1.9% false positives; the old RGB test both missed yellow-backboard cases and cannot be tuned to catch them.",
     "v_max_mm": 25.0,
-    "dy_px": 35,
     "r_start_px": 40,
-    "r_end_px": 40,
-    "n_red_min": 200,
+    "n_red_min": 300,
+    "berry": {
+      "_doc": "Physical end-window model: berry = sphere of berry_diameter (40mm); the trajectory endpoint sits end_above_berry_top_m above the berry top, so the berry CENTER is 45mm below the endpoint. The window center is the projection of that 3D point (offset along image-down in the optical frame); the window radius is margin × berry radius, scaled by the intrinsics at that depth (near-big/far-small). Window centers are never clipped to the image: fully outside = ~0 red = fail.",
+      "end_above_berry_top_m": 0.025,
+      "berry_radius_m": 0.02,
+      "window_margin": 1.5,
+      "window_r_min_px": 20,
+      "window_r_max_px": 100
+    },
     "red_hsv": {
       "_doc": "Red hue lives at both ends of the H circle; s/v gates reject white glare and dark shadow.",
       "hue1_max": 10,
@@ -27,10 +31,8 @@
     },
     "extrinsics_config": "configs/camera_gripper_extrinsics_sroi_v2_d405.json"
   },
-
   "categories": {
     "_doc": "Ordered classification chain. classify() evaluates categories by priority (lowest first); first match wins. Each entry: color (hex), problem (bool — counts against session in summary + sort), priority (int — lower sorts to top of page), rule + description (documentation only). All check numbers go to the CSV as evidence regardless of the final label, so thresholds can be re-judged without re-scanning.",
-
     "not_processed": {
       "color": "#757575",
       "problem": true,
@@ -81,26 +83,40 @@
       "description": "All checks passed"
     }
   },
-
   "display": {
     "_doc": "Plot appearance and page layout. Hex colors only.",
     "traj_color": "#1565c0",
     "gripper_color": "#e65100",
     "panel_background": "#f5f7fa",
     "category_default_color": "#999999",
-
-    "gripper_ylim": [-0.05, 1.05],
-
+    "gripper_ylim": [
+      -0.05,
+      1.05
+    ],
     "episodes_per_row": 3,
-    "figsize_session": [11.0, 2.4],
-    "figsize_summary": [11.0, 0.4],
+    "figsize_session": [
+      11.0,
+      2.4
+    ],
+    "figsize_summary": [
+      11.0,
+      0.4
+    ],
     "figsize_summary_base_height": 1.5,
     "outer_hspace": 0.55,
-    "outer_wspace": 0.30,
-    "inner_wspace": 0.30,
-    "outer_margins": [0.04, 0.98, 0.95, 0.04],
+    "outer_wspace": 0.3,
+    "inner_wspace": 0.3,
+    "outer_margins": [
+      0.04,
+      0.98,
+      0.95,
+      0.04
+    ],
     "episodes_per_row_rich": 2,
-    "figsize_session_rich": [13.0, 3.2],
+    "figsize_session_rich": [
+      13.0,
+      3.2
+    ],
     "inner_wspace_rich": 0.25
   }
 }

@@ -101,10 +101,18 @@ GRIPPER_END_OPEN_THRESHOLD: float = 0.2
 GRIPPER_END_TAIL: int = 10
 # Projection verdict + frame-jump threshold (from cfg["projection"])
 V_MAX_MM: float = 25.0
-PROJ_DY: int = 35
-PROJ_R_START: int = 40
-PROJ_R_END: int = 40
-PROJ_N_RED: int = 150
+PROJ_R_START: int = 40      # evidence-only start window (fixed radius)
+PROJ_N_RED: int = 200
+# Physical end-window model (user, 2026-10-16): berry = 40mm sphere, endpoint
+# sits ~25mm above the berry top → berry CENTER is 45mm below the endpoint.
+# The window is placed by projecting that 3D point (offset along image-down in
+# the optical frame) and sized by the intrinsics at that depth — perspective
+# handles near-big/far-small automatically.
+BERRY_END_ABOVE_M: float = 0.025   # endpoint above berry top
+BERRY_RADIUS_M: float = 0.020      # 40mm-diameter berry
+WINDOW_MARGIN: float = 1.5         # window radius = margin × berry radius
+WINDOW_R_MIN_PX: int = 20
+WINDOW_R_MAX_PX: int = 100
 RED_HUE1_MAX: int = 10
 RED_HUE2_MIN: int = 160
 RED_S_MIN: int = 60
@@ -172,10 +180,14 @@ def load_filters(path: Path | None = None) -> None:
 
     p = cfg.get("projection", {})
     V_MAX_MM = float(p.get("v_max_mm", 25.0))
-    PROJ_DY = int(p.get("dy_px", 35))
     PROJ_R_START = int(p.get("r_start_px", 40))
-    PROJ_R_END = int(p.get("r_end_px", 40))
-    PROJ_N_RED = int(p.get("n_red_min", 150))
+    PROJ_N_RED = int(p.get("n_red_min", 200))
+    b = p.get("berry", {})
+    BERRY_END_ABOVE_M = float(b.get("end_above_berry_top_m", 0.025))
+    BERRY_RADIUS_M = float(b.get("berry_radius_m", 0.020))
+    WINDOW_MARGIN = float(b.get("window_margin", 1.5))
+    WINDOW_R_MIN_PX = int(b.get("window_r_min_px", 20))
+    WINDOW_R_MAX_PX = int(b.get("window_r_max_px", 100))
     hsv = p.get("red_hsv", {})
     RED_HUE1_MAX = int(hsv.get("hue1_max", 10))
     RED_HUE2_MIN = int(hsv.get("hue2_min", 160))
@@ -391,14 +403,24 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         if len(pts2d) < 2:
             return vmax, None, None
         m = _red_mask_hsv(img)
-        # Window centers are NOT clipped to the image: a circle that falls
-        # (partly) outside simply counts fewer real pixels, and one fully
-        # outside counts ~0 and fails the rule — "no pixels to look at" is a
-        # fail, not a reason to sample the image border instead.
+        # Start window (evidence only), fixed radius, center NOT clipped.
         sx, sy = pts2d[0]
         red_start = _circle_count(m, int(round(sx)), int(round(sy)), PROJ_R_START)
-        ex, ey = pts2d[-1]
-        red_end = _circle_count(m, int(round(ex)), int(round(ey + PROJ_DY)), PROJ_R_END)
+
+        # End window from the physical berry model: place the berry CENTER in 3D
+        # (endpoint + [end_above + radius] straight down in the image plane) and
+        # project it; size the radius by the intrinsics at that depth. Window
+        # centers are NOT clipped: a circle outside the image counts ~0 and
+        # fails — "no pixels to look at" is a fail.
+        p_end = pts_opt[-1]
+        berry = p_end + np.array([0.0, BERRY_END_ABOVE_M + BERRY_RADIUS_M, 0.0])
+        bc, _ = cv2.projectPoints(berry.astype(np.float64).reshape(1, 1, 3),
+                                  np.zeros(3), np.zeros(3), K, D)
+        bcx, bcy = float(bc[0, 0, 0]), float(bc[0, 0, 1])
+        fy = float(K[1, 1])
+        r_px = int(round(np.clip(WINDOW_MARGIN * fy * BERRY_RADIUS_M / max(berry[2], 1e-6),
+                                 WINDOW_R_MIN_PX, WINDOW_R_MAX_PX)))
+        red_end = _circle_count(m, int(round(bcx)), int(round(bcy)), r_px)
         return vmax, red_start, red_end
     except Exception:
         return vmax, None, None
