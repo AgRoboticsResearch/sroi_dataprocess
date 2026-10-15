@@ -1,0 +1,89 @@
+diff --git a/Examples/Stereo/stereo_kitti.cc b/Examples/Stereo/stereo_kitti.cc
+index fdc8ef0..0047294 100644
+--- a/Examples/Stereo/stereo_kitti.cc
++++ b/Examples/Stereo/stereo_kitti.cc
+@@ -33,12 +33,14 @@ void LoadImages(const string &strPathToSequence, vector<string> &vstrImageLeft,
+ 
+ int main(int argc, char **argv)
+ {
+-    if(argc != 4)
++    if(argc != 5)
+     {
+-        cerr << endl << "Usage: ./stereo_kitti path_to_vocabulary path_to_settings path_to_sequence" << endl;
++        cerr << endl << "Usage: ./stereo_kitti path_to_vocabulary path_to_settings path_to_sequence visualization(true/false)" << endl;
+         return 1;
+     }
+ 
++    bool bUseViewer = string(argv[4]) == string("true");
++
+     // Retrieve paths to images
+     vector<string> vstrImageLeft;
+     vector<string> vstrImageRight;
+@@ -48,7 +50,7 @@ int main(int argc, char **argv)
+     const int nImages = vstrImageLeft.size();
+ 
+     // Create SLAM system. It initializes all system threads and gets ready to process frames.
+-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::STEREO,true);
++    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::STEREO,bUseViewer);
+     float imageScale = SLAM.GetImageScale();
+ 
+     // Vector for tracking time statistics
+@@ -126,15 +128,9 @@ int main(int argc, char **argv)
+ 
+         vTimesTrack[ni]=ttrack;
+ 
+-        // Wait to load the next frame
+-        double T=0;
+-        if(ni<nImages-1)
+-            T = vTimestamps[ni+1]-tframe;
+-        else if(ni>0)
+-            T = tframe-vTimestamps[ni-1];
+-
+-        if(ttrack<T)
+-            usleep((T-ttrack)*1e6);
++        // Offline batch processing: run at full speed (no real-time pacing).
++        // The recorded times.txt can have irregular/incorrect spacing, so the
++        // original usleep-based wait is disabled here.
+     }
+ 
+     // Stop all threads
+@@ -151,8 +147,8 @@ int main(int argc, char **argv)
+     cout << "median tracking time: " << vTimesTrack[nImages/2] << endl;
+     cout << "mean tracking time: " << totaltime/nImages << endl;
+ 
+-    // Save camera trajectory
+-    SLAM.SaveTrajectoryKITTI("CameraTrajectory.txt");
++    // Save camera trajectory into the sequence directory
++    SLAM.SaveTrajectoryKITTI(string(argv[3]) + "/CameraTrajectory.txt");
+ 
+     return 0;
+ }
+@@ -177,8 +173,8 @@ void LoadImages(const string &strPathToSequence, vector<string> &vstrImageLeft,
+         }
+     }
+ 
+-    string strPrefixLeft = strPathToSequence + "/image_0/";
+-    string strPrefixRight = strPathToSequence + "/image_1/";
++    string strPrefixLeft = strPathToSequence + "/left_";
++    string strPrefixRight = strPathToSequence + "/right_";
+ 
+     const int nTimes = vTimestamps.size();
+     vstrImageLeft.resize(nTimes);
+diff --git a/Thirdparty/Sophus/CMakeLists.txt b/Thirdparty/Sophus/CMakeLists.txt
+index 933445b..ef49fc8 100644
+--- a/Thirdparty/Sophus/CMakeLists.txt
++++ b/Thirdparty/Sophus/CMakeLists.txt
+@@ -16,11 +16,11 @@ set(CMAKE_CXX_STANDARD 11)
+ IF("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+    SET(CMAKE_CXX_FLAGS_DEBUG  "-O0 -g")
+    SET(CMAKE_CXX_FLAGS_RELEASE "-O3")
+-   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror -Wextra  -Wno-deprecated-register -Qunused-arguments -fcolor-diagnostics")
++   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra  -Wno-deprecated-register -Qunused-arguments -fcolor-diagnostics")
+ ELSEIF("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    SET(CMAKE_CXX_FLAGS_DEBUG  "-O0 -g")
+    SET(CMAKE_CXX_FLAGS_RELEASE "-O3")
+-   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror -Wextra -std=c++11 -Wno-deprecated-declarations -ftemplate-backtrace-limit=0")
++   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -std=c++11 -Wno-deprecated-declarations -ftemplate-backtrace-limit=0")
+    SET(CMAKE_CXX_FLAGS_COVERAGE "${CMAKE_CXX_FLAGS_DEBUG} --coverage -fno-inline -fno-inline-small-functions -fno-default-inline")
+    SET(CMAKE_EXE_LINKER_FLAGS_COVERAGE "${CMAKE_EXE_LINKER_FLAGS_DEBUG} --coverage")
+    SET(CMAKE_SHARED_LINKER_FLAGS_COVERAGE "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} --coverage")
