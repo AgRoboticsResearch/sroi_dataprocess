@@ -52,11 +52,22 @@ sroi_prepare_orb_input() {
 sroi_collect_trajectory() {
     local destination_episode="$1"
     if [ -z "$SROI_MASK_CONFIG" ]; then
-        [ -f "$destination_episode/CameraTrajectory.txt" ]
+        if [ ! -f "$destination_episode/CameraTrajectory.txt" ]; then
+            return 1
+        fi
+        if [ ! -f "$destination_episode/CameraTrajectory_idx.txt" ]; then
+            echo "sroi_collect_trajectory: CameraTrajectory_idx.txt missing (patched SLAM build required)" >&2
+            return 1
+        fi
         return
     fi
     local masked_trajectory="$SROI_ORB_INPUT_DIR/CameraTrajectory.txt"
     if [ ! -f "$masked_trajectory" ]; then
+        return 1
+    fi
+    local masked_ledger="$SROI_ORB_INPUT_DIR/CameraTrajectory_idx.txt"
+    if [ ! -f "$masked_ledger" ]; then
+        echo "sroi_collect_trajectory: SLAM produced no CameraTrajectory_idx.txt (patched build required)" >&2
         return 1
     fi
     local destination="$destination_episode/CameraTrajectory.txt"
@@ -65,7 +76,14 @@ sroi_collect_trajectory() {
         rm -f -- "$temporary"
         return 1
     fi
+    local destination_idx="$destination_episode/CameraTrajectory_idx.txt"
+    local temporary_idx="$destination_idx.tmp"
+    if ! cp "$masked_ledger" "$temporary_idx"; then
+        rm -f -- "$temporary" "$temporary_idx"
+        return 1
+    fi
     mv "$temporary" "$destination"
+    mv "$temporary_idx" "$destination_idx"
 }
 
 trap sroi_cleanup_mask_input EXIT

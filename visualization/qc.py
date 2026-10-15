@@ -45,14 +45,17 @@ API usage:
     from visualization.qc import load_filters
     load_filters(Path("/path/to/custom.json"))  # before scan_sessions
 
-Categories (per episode):
-    ok                  - non-static motion + valid gripper signal, closed at end
-    static              - trajectory path below the configured threshold
-    flat_gripper        - motion present, gripper signal has no actuation
-    gripper_not_closed  - mean of final finite readings is above the threshold
-    no_gripper          - gripper_distances.txt missing or empty
-    no_traj             - trajectory file missing/empty or too short
-    all_nan_gripper     - all gripper values are NaN
+Categories (per episode), evaluated in priority order (first match wins;
+evidence columns keep every check's numbers regardless of the final label):
+    not_processed           - trajectory/gripper stream missing or too short
+                              (plumbing guard: an upstream step did not run)
+    traj_long_gap           - trajectory ledger has 'invalid' rows (long tracking loss)
+    gripper_missing         - gripper_distances.txt contains any NaN (incl. all-NaN)
+    traj_frame_jump         - per-frame step above threshold on the SMOOTHED trajectory
+    first_frame_projection  - projected tip path on the first color frame finds no
+                              strawberry near the start tip and/or below the end point
+    gripper_not_closed      - mean of final finite readings is above the threshold
+    ok                      - everything passed
 """
 
 from __future__ import annotations
@@ -73,6 +76,12 @@ from matplotlib.collections import LineCollection
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers the "3d" projection)
 import numpy as np
 
+try:
+    import cv2  # projection verdict needs it; CSV-only mode works without
+    HAVE_CV2 = True
+except ImportError:
+    HAVE_CV2 = False
+
 
 # ============================================================================
 # Config — all tunable values live in configs/qc_filters.json
@@ -90,6 +99,17 @@ EXTENT_PADDING_RATIO: float = 0.05
 EXTENT_PADDING_MIN_CM: float = 0.5
 GRIPPER_END_OPEN_THRESHOLD: float = 0.2
 GRIPPER_END_TAIL: int = 10
+# Projection verdict + frame-jump threshold (from cfg["projection"])
+V_MAX_MM: float = 25.0
+PROJ_DY: int = 35
+PROJ_R_START: int = 40
+PROJ_R_END: int = 40
+PROJ_N_RED: int = 150
+RED_HUE1_MAX: int = 10
+RED_HUE2_MIN: int = 160
+RED_S_MIN: int = 60
+RED_V_MIN: int = 60
+EXTRINSICS_CONFIG: str = ""
 CATEGORY_COLORS: dict[str, str] = {}
 CATEGORY_DEFAULT_COLOR: str = "#999999"
 PROBLEM_CATEGORIES: set[str] = set()
@@ -122,6 +142,8 @@ def load_filters(path: Path | None = None) -> None:
     global STATIC_PATH_M, FLAT_GRIPPER_STD, MIN_TRAJ_FRAMES
     global EXTENT_PADDING_RATIO, EXTENT_PADDING_MIN_CM
     global GRIPPER_END_OPEN_THRESHOLD, GRIPPER_END_TAIL
+    global V_MAX_MM, PROJ_DY, PROJ_R_START, PROJ_R_END, PROJ_N_RED
+    global RED_HUE1_MAX, RED_HUE2_MIN, RED_S_MIN, RED_V_MIN, EXTRINSICS_CONFIG
     global CATEGORY_COLORS, CATEGORY_DEFAULT_COLOR, PROBLEM_CATEGORIES, CATEGORY_SORT_ORDER
     global TRAJ_COLOR, GRIP_COLOR, PANEL_BG, GRIPPER_YLIM
     global EPISODES_PER_ROW, FIGSIZE_SESSION, FIGSIZE_SUMMARY, FIGSIZE_SUMMARY_BASE_HEIGHT
@@ -138,8 +160,8 @@ def load_filters(path: Path | None = None) -> None:
         cfg = json.load(f)
 
     t = cfg["thresholds"]
-    STATIC_PATH_M = float(t["static_path_m"])
-    FLAT_GRIPPER_STD = float(t["flat_gripper_std"])
+    STATIC_PATH_M = float(t.get("static_path_m", 0.1))       # evidence only now
+    FLAT_GRIPPER_STD = float(t.get("flat_gripper_std", 0.05))  # unused, kept for compat
     MIN_TRAJ_FRAMES = int(t.get("min_traj_frames", 2))
     EXTENT_PADDING_RATIO = float(t.get("extent_padding_ratio", 0.05))
     EXTENT_PADDING_MIN_CM = float(t.get("extent_padding_min_cm", 0.5))
@@ -147,6 +169,19 @@ def load_filters(path: Path | None = None) -> None:
     GRIPPER_END_TAIL = int(t.get("gripper_end_tail", 10))
     if GRIPPER_END_TAIL < 1:
         raise ValueError("thresholds.gripper_end_tail must be at least 1")
+
+    p = cfg.get("projection", {})
+    V_MAX_MM = float(p.get("v_max_mm", 25.0))
+    PROJ_DY = int(p.get("dy_px", 35))
+    PROJ_R_START = int(p.get("r_start_px", 40))
+    PROJ_R_END = int(p.get("r_end_px", 40))
+    PROJ_N_RED = int(p.get("n_red_min", 150))
+    hsv = p.get("red_hsv", {})
+    RED_HUE1_MAX = int(hsv.get("hue1_max", 10))
+    RED_HUE2_MIN = int(hsv.get("hue2_min", 160))
+    RED_S_MIN = int(hsv.get("s_min", 60))
+    RED_V_MIN = int(hsv.get("v_min", 60))
+    EXTRINSICS_CONFIG = str(p.get("extrinsics_config", ""))
 
     cats = {k: v for k, v in cfg["categories"].items() if isinstance(v, dict)}
     CATEGORY_COLORS = {k: v["color"] for k, v in cats.items()}
@@ -196,6 +231,10 @@ class EpisodeQC:
     gripper_std: float = 0.0
     gripper_range: float = 0.0
     gripper_end: float | None = None
+    n_invalid_traj: int = -1
+    vmax_mm: float = 0.0
+    red_start: int | None = None
+    red_end: int | None = None
     # Raw arrays (only kept if keep_arrays=True on scan)
     pos: np.ndarray | None = field(default=None, repr=False)
     grip: np.ndarray | None = field(default=None, repr=False)
@@ -258,21 +297,129 @@ def _gripper_end_value(grip: np.ndarray | None) -> float | None:
 def _path_length(pos: np.ndarray | None) -> float:
     if pos is None or len(pos) < 2:
         return 0.0
-    return float(np.sum(np.linalg.norm(np.diff(pos, axis=0), axis=1)))
+    return float(np.nansum(np.linalg.norm(np.diff(pos, axis=0), axis=1)))
 
 
-def classify(pos: np.ndarray | None, grip: np.ndarray | None) -> str:
-    if pos is None or len(pos) < MIN_TRAJ_FRAMES:
-        return "no_traj"
-    if _path_length(pos) < STATIC_PATH_M:
-        return "static"
-    if grip is None:
-        return "no_gripper"
-    finite = grip[np.isfinite(grip)]
-    if len(finite) == 0:
-        return "all_nan_gripper"
-    if finite.std() < FLAT_GRIPPER_STD:
-        return "flat_gripper"
+def _load_poses(traj_path: Path) -> np.ndarray | None:
+    """Load CameraTrajectoryTransformed.txt -> (N, 4, 4) camera_link poses, or None."""
+    if not traj_path.exists():
+        return None
+    try:
+        raw = np.loadtxt(traj_path, comments="#")
+    except Exception:
+        return None
+    if raw.ndim == 1:
+        raw = raw.reshape(1, -1)
+    if raw.shape[1] < 12:
+        return None
+    if raw.shape[1] > 12:
+        raw = raw[:, -12:]
+    poses34 = raw.reshape(-1, 3, 4)
+    bottom = np.tile(np.array([0.0, 0.0, 0.0, 1.0]), (len(poses34), 1, 1))
+    return np.concatenate([poses34, bottom], axis=1)
+
+
+def _load_ledger_invalid(episode_dir: Path) -> int:
+    """Count 'invalid' rows in CameraTrajectory_idx.txt (long-gap verdicts).
+
+    Returns -1 when the ledger is missing/unreadable (upstream repair not run).
+    """
+    fp = episode_dir / "CameraTrajectory_idx.txt"
+    if not fp.exists():
+        return -1
+    try:
+        n = sum(1 for l in fp.read_text().splitlines()
+                if l.strip() and not l.startswith("#") and l.split()[1] == "invalid")
+    except Exception:
+        return -1
+    return n
+
+
+def _red_mask_hsv(img_bgr: np.ndarray) -> np.ndarray:
+    """Boolean mask of red pixels via HSV hue ranges (robust to the yellow
+    false positives of the old RGB test)."""
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0]
+    return (((h <= RED_HUE1_MAX) | (h >= RED_HUE2_MIN))
+            & (hsv[:, :, 1] >= RED_S_MIN) & (hsv[:, :, 2] >= RED_V_MIN))
+
+
+def _circle_count(mask: np.ndarray, cx: int, cy: int, rad: int) -> int:
+    h, w = mask.shape
+    yy, xx = np.ogrid[:h, :w]
+    return int((mask & ((xx - cx) ** 2 + (yy - cy) ** 2 <= rad * rad)).sum())
+
+
+def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, int | None, int | None]:
+    """First-frame projection verdict inputs + per-frame max step.
+
+    Treats the gripper tip as a static point in the camera frame and projects
+    its world path (relative to frame 0) back onto the FIRST color frame with
+    the recorded intrinsics. Returns (vmax_mm, red_start, red_end); the red
+    counts are None when the needed files/cv2 are unavailable (evidence row
+    stays empty, category decided by the remaining checks).
+    """
+    steps = np.linalg.norm(np.diff(poses[:, :3, 3], axis=0), axis=1) * 1000.0
+    vmax = float(np.nanmax(steps)) if len(steps) else 0.0
+
+    img_fp = episode_dir / "color_000000.png"
+    info_fp = episode_dir / "camera_info_color.json"
+    if not (HAVE_CV2 and img_fp.exists() and info_fp.exists() and EXTRINSICS_CONFIG):
+        return vmax, None, None
+    ext_path = Path(EXTRINSICS_CONFIG)
+    if not ext_path.is_absolute():
+        ext_path = Path(__file__).resolve().parent.parent / ext_path
+    try:
+        ext = json.load(open(ext_path))
+        info = json.load(open(info_fp))
+        img = cv2.imread(str(img_fp))
+        if img is None:
+            return vmax, None, None
+        T_oc = np.array(ext["T_optical_camera"], dtype=float)[:3, :3]
+        tip_link = np.array(ext["T_camera_gripper_tip"], dtype=float)[:3, 3]
+        K = np.array(info["K"], dtype=float).reshape(3, 3)
+        D = np.array(info["D"], dtype=float).ravel()
+
+        rel = np.linalg.inv(poses[0]) @ poses          # camera_link, relative to frame 0
+        pts_link = (rel[:, :3, :3] @ tip_link[:, None]).squeeze(2) + rel[:, :3, 3]
+        pts_opt = pts_link @ T_oc.T                     # into optical convention for K
+        pts2d, _ = cv2.projectPoints(pts_opt.astype(np.float64),
+                                     np.zeros(3), np.zeros(3), K, D)
+        pts2d = pts2d.reshape(-1, 2)
+        finite = np.isfinite(pts2d).all(axis=1)
+        pts2d = pts2d[finite]
+        if len(pts2d) < 2:
+            return vmax, None, None
+        h, w = img.shape[:2]
+        m = _red_mask_hsv(img)
+        sx, sy = np.clip(pts2d[0], [0, 0], [w - 1, h - 1]).astype(int)
+        red_start = _circle_count(m, int(sx), int(sy), PROJ_R_START)
+        ex, ey = np.clip(pts2d[-1], [0, 0], [w - 1, h - 1]).astype(int)
+        end_cx = int(np.clip(ex, 0, w - 1))
+        end_cy = int(np.clip(ey + PROJ_DY, 0, h - 1))
+        red_end = _circle_count(m, end_cx, end_cy, PROJ_R_END)
+        return vmax, red_start, red_end
+    except Exception:
+        return vmax, None, None
+
+
+def classify(pos: np.ndarray | None, grip: np.ndarray | None,
+             n_invalid_traj: int = 0, vmax_mm: float = 0.0,
+             red_start: int | None = None, red_end: int | None = None) -> str:
+    """Task-level verdict. Evidence values ride along only to gate the checks
+    that need them; every number is ALSO written to the CSV as evidence."""
+    if pos is None or len(pos) < MIN_TRAJ_FRAMES or grip is None or len(grip) == 0:
+        return "not_processed"
+    if n_invalid_traj != 0:  # >0 = long gap present; -1 = repair not run
+        return "traj_long_gap" if n_invalid_traj > 0 else "not_processed"
+    if not np.isfinite(grip).all():
+        return "gripper_missing"
+    if vmax_mm > V_MAX_MM:
+        return "traj_frame_jump"
+    if red_start is not None and red_start < PROJ_N_RED:
+        return "first_frame_projection"
+    if red_end is not None and red_end < PROJ_N_RED:
+        return "first_frame_projection"
     end = _gripper_end_value(grip)
     if end is not None and end > GRIPPER_END_OPEN_THRESHOLD:
         return "gripper_not_closed"
@@ -281,9 +428,15 @@ def classify(pos: np.ndarray | None, grip: np.ndarray | None) -> str:
 
 def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
     """Compute QC metrics for a single episode directory."""
-    pos = _load_trajectory(episode_dir / "CameraTrajectoryTransformed.txt")
+    poses = _load_poses(episode_dir / "CameraTrajectoryTransformed.txt")
+    pos = poses[:, :3, 3] if poses is not None else None
     grip = _load_gripper(episode_dir / "gripper_distances.txt")
-    cat = classify(pos, grip)
+    n_invalid = _load_ledger_invalid(episode_dir)
+
+    vmax_mm, red_start, red_end = 0.0, None, None
+    if poses is not None and len(poses) >= 2:
+        vmax_mm, red_start, red_end = _projection_evidence(episode_dir, poses)
+    cat = classify(pos, grip, n_invalid, vmax_mm, red_start, red_end)
 
     e = EpisodeQC(
         session=episode_dir.parent.name,
@@ -292,10 +445,14 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
         category=cat,
         n_traj_frames=int(len(pos)) if pos is not None else 0,
         path_length_cm=_path_length(pos) * 100,
-        xy_span_cm=float(np.ptp(pos[:, :2], axis=0).max()) * 100 if pos is not None and len(pos) else 0.0,
-        z_span_cm=float(np.ptp(pos[:, 2])) * 100 if pos is not None and len(pos) else 0.0,
+        xy_span_cm=float(np.nanmax(np.ptp(pos[:, :2], axis=0))) * 100 if pos is not None and len(pos) else 0.0,
+        z_span_cm=float(np.nanmax(np.ptp(pos[:, 2]))) * 100 if pos is not None and len(pos) else 0.0,
         n_grip_frames=int(len(grip)) if grip is not None else 0,
         n_nan_gripper=int((~np.isfinite(grip)).sum()) if grip is not None else 0,
+        n_invalid_traj=n_invalid,
+        vmax_mm=vmax_mm,
+        red_start=red_start,
+        red_end=red_end,
     )
     if grip is not None and len(grip):
         finite = grip[np.isfinite(grip)]
@@ -330,7 +487,8 @@ def scan_sessions(root: Path, pattern: str = "*-png", keep_arrays: bool = True) 
 CSV_FIELDS = ["session", "episode", "category",
               "path_length_cm", "xy_span_cm", "z_span_cm", "n_traj_frames",
               "n_nan_gripper", "n_grip_frames", "gripper_std", "gripper_range",
-              "gripper_end", "path"]
+              "gripper_end", "n_invalid_traj", "vmax_mm", "red_start", "red_end",
+              "path"]
 
 
 def write_csv(session_data: dict[str, list[EpisodeQC]], output: Path) -> None:
@@ -569,19 +727,19 @@ def _render_summary_page(pdf: PdfPages, session_data: dict[str, list[EpisodeQC]]
         cats = [e.category for e in eps]
         paths = [e.path_length_cm for e in eps]
         n_ok = sum(1 for c in cats if c == "ok")
-        n_static = sum(1 for c in cats if c == "static")
-        n_other = len(cats) - n_ok - n_static
+        n_bad = sum(1 for c in cats if c in PROBLEM_CATEGORIES)
+        n_unproc = len(cats) - n_ok - n_bad
         rows.append([
             s,
             f"{len(eps)}",
             f"{n_ok}",
-            f"{n_static}",
-            f"{n_other}",
+            f"{n_bad}",
+            f"{n_unproc}",
             f"{np.mean(paths):.1f}" if paths else "0",
             f"{max(paths):.1f}" if paths else "0",
         ])
 
-    cols = ["session", "eps", "ok", "static", "other", "avg_path_cm", "max_path_cm"]
+    cols = ["session", "eps", "ok", "problem", "unprocessed", "avg_path_cm", "max_path_cm"]
     table = ax.table(cellText=rows, colLabels=cols, loc="center", cellLoc="left")
     table.auto_set_font_size(False)
     table.set_fontsize(9)
@@ -593,7 +751,7 @@ def _render_summary_page(pdf: PdfPages, session_data: dict[str, list[EpisodeQC]]
         cats = [e.category for e in session_data[s]]
         if all(c == "ok" for c in cats):
             color = "#c8e6c9"
-        elif any(c in ("static", "no_traj", "all_nan_gripper") for c in cats):
+        elif any(c in PROBLEM_CATEGORIES for c in cats):
             color = "#ffcdd2"
         else:
             color = "#ffe0b2"

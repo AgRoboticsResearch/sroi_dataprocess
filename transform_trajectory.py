@@ -24,35 +24,64 @@ from pathlib import Path
 
 def load_trajectory_data(folder_path):
     """
-    Load trajectory and timestamp data from folder.
-    
-    Args:
-        folder_path (str): Path to folder containing times.txt and CameraTrajectory.txt
-        
+    Load trajectory, frame ledger and timestamp data from folder.
+
+    Expects the REPAIRED generation (repair_trajectory.py): trajectory rows
+    == frame count, CameraTrajectory_idx.txt is the 3-col ledger
+    (<frame> <state> <seg_len>). Timestamps are taken through the ledger's
+    frame ids — never by row position.
+
     Returns:
         tuple: (trajectory_matrices, timestamps)
+    Raises:
+        ValueError on any count/format mismatch (caller reports and fails).
     """
     time_path = os.path.join(folder_path, "times.txt")
     traj_path = os.path.join(folder_path, "CameraTrajectory.txt")
-    
-    if not os.path.exists(time_path):
-        raise FileNotFoundError(f"times.txt not found in {folder_path}")
-    if not os.path.exists(traj_path):
-        raise FileNotFoundError(f"CameraTrajectory.txt not found in {folder_path}")
-    
-    # Load trajectory data and reshape to 4x4 matrices
+    idx_path = os.path.join(folder_path, "CameraTrajectory_idx.txt")
+
+    for p, name in ((time_path, "times.txt"), (traj_path, "CameraTrajectory.txt"),
+                    (idx_path, "CameraTrajectory_idx.txt")):
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"{name} not found in {folder_path} (run SLAM + repair first)")
+
+    timestamps = np.loadtxt(time_path, delimiter=" ", ndmin=1)
+    n = len(timestamps)
+
     traj = np.loadtxt(traj_path, delimiter=" ")
+    if traj.ndim == 1:
+        traj = traj.reshape(1, -1)
+    if traj.shape[1] != 12:
+        raise ValueError(f"CameraTrajectory.txt has {traj.shape[1]} columns, expected 12")
+    if traj.shape[0] != n:
+        raise ValueError(
+            f"trajectory rows ({traj.shape[0]}) != frames ({n}) — "
+            "repair_trajectory.py has not run (or SLAM output is stale). Run it first.")
+
+    idx_lines = [l for l in open(idx_path).read().splitlines() if l.strip() and not l.startswith("#")]
+    if len(idx_lines) != n:
+        raise ValueError(f"ledger rows ({len(idx_lines)}) != frames ({n}) — rerun repair_trajectory.py")
+    rows = [l.split() for l in idx_lines]
+    if any(len(r) != 3 for r in rows):
+        raise ValueError("ledger is 1-column (raw SLAM generation) — run repair_trajectory.py first")
+    frames = np.array([int(r[0]) for r in rows])
+    if not np.array_equal(frames, np.arange(n)):
+        raise ValueError("ledger frame ids are not 0..N-1 — rerun repair_trajectory.py")
+
+    # Cross-check: NaN rows in the trajectory must sit exactly on the ledger's
+    # invalid rows — ties the holes in the data to the verdicts in the ledger.
+    traj2d = np.loadtxt(traj_path, delimiter=" ", ndmin=2)
+    nan_rows = np.isnan(traj2d).any(axis=1)
+    invalid_rows = np.array([r[1] == "invalid" for r in rows])
+    if not np.array_equal(nan_rows, invalid_rows):
+        raise ValueError("NaN rows do not match ledger 'invalid' rows — rerun repair_trajectory.py")
+
     traj = traj.reshape(-1, 3, 4)
-    
-    # Append [0 0 0 1] to each 3x4 matrix to make it 4x4
     append_row = np.zeros((traj.shape[0], 1, 4))
     append_row[:, 0, 3] = 1
     traj = np.concatenate((traj, append_row), axis=1)
-    
-    # Load timestamps
-    timestamps = np.loadtxt(time_path, delimiter=" ")
-    
-    return traj, timestamps
+
+    return traj, timestamps[frames]
 
 
 def transform_trajectory(traj):
@@ -65,10 +94,10 @@ def transform_trajectory(traj):
     Returns:
         np.ndarray: Transformed trajectory matrices
     """
-    # Get the initial camera pose as reference frame
-    T_world_to_initial_cam = traj[0]  # First pose becomes our reference
-    T_initial_cam_to_world = np.linalg.inv(T_world_to_initial_cam)
-    
+    # ORB-SLAM already normalizes its world origin to the first keyframe, so
+    # poses arrive relative to the initial camera frame by construction — no
+    # re-basing needed here (the previous inverse of traj[0] was dead code).
+
     # Transformation from ORB-SLAM camera frame to X-forward frame
     # ORB-SLAM: X-right, Y-down, Z-forward
     # Target:   X-forward, Y-left, Z-up
@@ -151,19 +180,12 @@ def process_folder(folder_path, output_path=None):
         # Check if files exist to avoid error spam when recursive
         if not (folder_path / "times.txt").exists() or not (folder_path / "CameraTrajectory.txt").exists():
             return False
-            
+
         print(f"\n--- Processing: {folder_path} ---")
         print(f"Loading trajectory data from: {folder_path}")
         traj, timestamps = load_trajectory_data(str(folder_path))
         print(f"Loaded {len(traj)} trajectory poses and {len(timestamps)} timestamps")
-        
-        if len(traj) != len(timestamps):
-            print(f"Warning: Number of trajectory poses ({len(traj)}) doesn't match timestamps ({len(timestamps)})")
-            min_len = min(len(traj), len(timestamps))
-            traj = traj[:min_len]
-            timestamps = timestamps[:min_len]
-            print(f"Using first {min_len} entries")
-        
+
         print("Transforming trajectory to initial camera frame...")
         traj_transformed = transform_trajectory(traj)
         
@@ -232,23 +254,26 @@ Examples:
     # Process recursive or single folder
     if args.recursive:
         print(f"Searching recursively in {folder_path}...")
-        processed_count = 0
+        processed_count = failed_count = 0
         for root, dirs, files in os.walk(folder_path):
             current_dir = Path(root)
             if (current_dir / "times.txt").exists() and (current_dir / "CameraTrajectory.txt").exists():
                 out_path = Path(args.output) if args.output else None
                 if process_folder(current_dir, out_path):
                     processed_count += 1
-        print(f"\nFinished. Processed {processed_count} folders.")
+                else:
+                    failed_count += 1
+        print(f"\nFinished. Processed {processed_count} folders, {failed_count} failed.")
+        sys.exit(1 if failed_count else 0)
     else:
         out_path = Path(args.output) if args.output else None
-        
+
         if not (folder_path / "times.txt").exists() or not (folder_path / "CameraTrajectory.txt").exists():
             print(f"Error: Required files 'times.txt' and/or 'CameraTrajectory.txt' not found in '{folder_path}'")
             print(f"To search subdirectories, use the --recursive flag.")
             sys.exit(1)
-            
-        process_folder(folder_path, out_path)
+
+        sys.exit(0 if process_folder(folder_path, out_path) else 1)
 
 
 if __name__ == "__main__":

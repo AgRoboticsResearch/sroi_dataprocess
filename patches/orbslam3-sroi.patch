@@ -87,3 +87,81 @@ index 933445b..ef49fc8 100644
     SET(CMAKE_CXX_FLAGS_COVERAGE "${CMAKE_CXX_FLAGS_DEBUG} --coverage -fno-inline -fno-inline-small-functions -fno-default-inline")
     SET(CMAKE_EXE_LINKER_FLAGS_COVERAGE "${CMAKE_EXE_LINKER_FLAGS_DEBUG} --coverage")
     SET(CMAKE_SHARED_LINKER_FLAGS_COVERAGE "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} --coverage")
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 863c98e..343d0a3 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -153,6 +153,11 @@ public:
+     list<KeyFrame*> mlpReferences;
+     list<double> mlFrameTimes;
+     list<bool> mlbLost;
++    // SROI: absolute Frame::mnId for each entry of the lists above. The frame
++    // id is the ground-truth slot of each saved pose row — the other lists are
++    // compacted (frames lost during tracking never enter them), so position in
++    // the list is NOT the frame index. Kept in lockstep by Tracking::Track.
++    list<long unsigned int> mlFrameIds;
+ 
+     // frames with estimated pose
+     int mTrackedFr;
+diff --git a/src/System.cc b/src/System.cc
+index 60d9c51..aa6765d 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -1223,6 +1223,19 @@ void System::SaveTrajectoryKITTI(const string &filename)
+     f.open(filename.c_str());
+     f << fixed;
+ 
++    // SROI: alongside the pose file, write a frame-index ledger with one line
++    // per SAVED pose row ("<name>_idx.txt", one Frame::mnId per line). The
++    // pose list is compacted — frames lost during tracking never enter it —
++    // so the row number is not the frame index. Downstream repair aligns rows
++    // to frames strictly through this ledger.
++    string idxFilename = filename;
++    if(idxFilename.size() >= 4 && idxFilename.substr(idxFilename.size()-4) == ".txt")
++        idxFilename = idxFilename.substr(0, idxFilename.size()-4) + "_idx.txt";
++    else
++        idxFilename += "_idx.txt";
++    ofstream fIdx;
++    fIdx.open(idxFilename.c_str());
++
+     // Frame pose is stored relative to its reference keyframe (which is optimized by BA and pose graph).
+     // We need to get first the keyframe pose and then concatenate the relative transformation.
+     // Frames not localized (tracking failure) are not saved.
+@@ -1231,8 +1244,9 @@ void System::SaveTrajectoryKITTI(const string &filename)
+     // which is true when tracking failed (lbL).
+     list<ORB_SLAM3::KeyFrame*>::iterator lRit = mpTracker->mlpReferences.begin();
+     list<double>::iterator lT = mpTracker->mlFrameTimes.begin();
++    list<long unsigned int>::iterator lF = mpTracker->mlFrameIds.begin();
+     for(list<Sophus::SE3f>::iterator lit=mpTracker->mlRelativeFramePoses.begin(),
+-        lend=mpTracker->mlRelativeFramePoses.end();lit!=lend;lit++, lRit++, lT++)
++        lend=mpTracker->mlRelativeFramePoses.end();lit!=lend;lit++, lRit++, lT++, lF++)
+     {
+         ORB_SLAM3::KeyFrame* pKF = *lRit;
+ 
+@@ -1257,8 +1271,11 @@ void System::SaveTrajectoryKITTI(const string &filename)
+         f << setprecision(9) << Rwc(0,0) << " " << Rwc(0,1)  << " " << Rwc(0,2) << " "  << twc(0) << " " <<
+              Rwc(1,0) << " " << Rwc(1,1)  << " " << Rwc(1,2) << " "  << twc(1) << " " <<
+              Rwc(2,0) << " " << Rwc(2,1)  << " " << Rwc(2,2) << " "  << twc(2) << endl;
++        fIdx << *lF << endl;
+     }
+     f.close();
++    fIdx.close();
++    cout << "Saved frame-index ledger to " << idxFilename << " ..." << endl;
+ }
+ 
+ 
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..988252b 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -2299,6 +2299,10 @@ void Tracking::Track()
+ 
+     if(mState==OK || mState==RECENTLY_LOST)
+     {
++        // SROI: record this frame's absolute id once — both branches below push
++        // exactly one entry into the trajectory lists, so this stays in lockstep.
++        mlFrameIds.push_back(mCurrentFrame.mnId);
++
+         // Store frame pose information to retrieve the complete camera trajectory afterwards.
+         if(mCurrentFrame.isSet())
+         {

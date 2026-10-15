@@ -17,6 +17,8 @@ ORB-SLAM3 **不在本仓库里**。它是官方仓库的一份 clone，自己编
 
 - 不打补丁 → `stereo_kitti` **找不到我们的图片**（图片命名约定不同）→ 直接跑不了
 - 不打补丁 → Sophus 的 `-Werror` 让 gcc-13 编译**直接失败**
+- 不打补丁 → **没有帧号账本**（`CameraTrajectory_idx.txt`），轨迹行和帧的
+  对齐无从谈起，下游修复工具直接拒收
 
 所以这个补丁是本管线的**硬依赖**。
 
@@ -26,7 +28,7 @@ ORB-SLAM3 **不在本仓库里**。它是官方仓库的一份 clone，自己编
 |---|---|
 | 仓库 | `https://github.com/UZ-SLAMLab/ORB_SLAM3.git` |
 | 基线 commit | `4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4`（upstream，2022-02-10） |
-| 补丁文件 | `orbslam3-sroi.patch`（2 个文件，32 行改动） |
+| 补丁文件 | `orbslam3-sroi.patch`（5 个文件，41+/19- 行改动） |
 
 > ⚠️ 仓库 URL 只能用 `UZ-SLAMLab`（无连字符）。组织名曾是 `UZ-SLAM-Lab`，
 > 旧的带连字符 URL 会 **404**，而 git 会误报成"要你输入用户名"。
@@ -72,6 +74,18 @@ export LD_LIBRARY_PATH=$HOME/code/ORB_SLAM3/lib:$HOME/code/Pangolin/install/lib
 `Thirdparty/Sophus/CMakeLists.txt`
 
 6. 去掉 `-Werror`：gcc-13 对 Eigen/SSE 的 `-Warray-bounds` 误报会变成致命错误
+
+`include/Tracking.h` + `src/Tracking.cc` + `src/System.cc`（帧号账本，2026-10-16 加）
+
+7. `Tracking` 新增 `mlFrameIds`（与 `mlRelativeFramePoses` 等四个 list 平行，
+   `Tracking.cc` 每次 push 的同时记录 `mCurrentFrame.mnId`）。
+   **帧号必须用 `mnId`**：那四个 list 是被压缩过的（跟丢帧根本没进 list），
+   循环计数器给的是"看着连续、实际错位"的号；时间戳也不行——退化分支
+   `mlFrameTimes.push_back(mlFrameTimes.back())` 恰好在跟丢时复制上一帧时间戳。
+   离线 stereo 模式下 `mnId` 每张图恰好 +1，等于图像的绝对帧号。
+8. `SaveTrajectoryKITTI` 在写 12 列位姿的同时，把 "<文件名>_idx.txt" 写成
+   **每行一个帧号**（与位姿行严格一一对应；`if(!pKF) continue;` 跳过的行
+   两边同步跳过）。下游 `repair_trajectory.py` 只认账本对齐，不认行号。
 
 ### 只重编 `stereo_kitti`
 

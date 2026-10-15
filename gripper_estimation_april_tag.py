@@ -47,6 +47,7 @@ Use --configs to select one (defaults to D405).
 
 import json
 import os
+import sys
 import cv2 as cv
 import matplotlib
 matplotlib.use('Agg')
@@ -461,11 +462,13 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
 
     # Phase 1: detect tag positions per frame for every episode
     detections = {}
+    no_image_count = 0
     for data_folder in data_folders:
         folder = str(data_folder)
         images = find_color_images(folder if folder.endswith('/') else folder + '/')
         if not images:
             print(f"\n--- {Path(folder).name}: no color images, skipping")
+            no_image_count += 1
             continue
         print(f"\n--- {Path(folder).name}: {len(images)} frames")
         det = detect_episode(
@@ -490,7 +493,7 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
 
     if not detections:
         print("No episodes with color images; nothing to process.")
-        return
+        return {"ok": 0, "zero": 0, "no_images": no_image_count}
 
     # Phase 2a: symmetry centers, pooled valid samples, shared min/max
     run_center = run_center_fallback(list(detections.values()))
@@ -511,8 +514,16 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
             print(f"Warning: no valid distance samples in {folder}; skipping episode.")
 
     if not pooled_parts:
-        print("No episodes with valid AprilTag detections; nothing to normalize.")
-        return
+        # Whole run has zero valid detections: every episode gets an all-NaN
+        # series (verdict left to QC) — no normalization manifest possible.
+        print("No episodes with valid AprilTag detections; writing all-NaN series.")
+        for folder, det in detections.items():
+            n_frames = len(det.left_xs)
+            out = folder if folder.endswith('/') else folder + '/'
+            np.savetxt(out + "gripper_distances.txt", np.full(n_frames, np.nan))
+            with open(out + DETECTION_STATS_NAME, 'w') as f:
+                json.dump({"status": "zero_detections", "frame_count": n_frames}, f, indent=2)
+        return {"ok": 0, "zero": len(detections), "no_images": no_image_count}
     pooled = np.concatenate(pooled_parts)
 
     manual_min = cfg.get("gripper_min_distance")
@@ -572,6 +583,7 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
         median_filter_fn = lambda a: medfilt(a, kernel_size=median_filter_size)
 
     # Phase 2b: per-episode cleanup (spikes, interpolation) and save
+    n_ok = n_zero = 0
     for folder, det in detections.items():
         center = run_center  # session-level uniformly: one rig per session
         if not use_symmetry:
@@ -587,12 +599,32 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
             median_filter_fn=median_filter_fn,
         )
         if raw is None:
-            print(f"Warning: no valid samples for {folder}; skipping.")
+            # Zero detections: keep processing to the end — write an all-NaN
+            # series of the right length and let QC (gripper_missing) decide.
+            n_frames = len(det.left_xs)
+            out = folder if folder.endswith('/') else folder + '/'
+            np.savetxt(out + "gripper_distances.txt", np.full(n_frames, np.nan))
+            zero_stats = {
+                "status": "zero_detections",
+                "frame_count": n_frames,
+                "interp_mode": interp_mode,
+                "symmetry_enabled": use_symmetry,
+            }
+            with open(out + DETECTION_STATS_NAME, 'w') as f:
+                json.dump(zero_stats, f, indent=2)
+            print(f"Warning: no valid AprilTag samples in {Path(folder).name}; "
+                  f"wrote all-NaN gripper_distances.txt ({n_frames} frames) — "
+                  "QC will flag it (gripper_missing).")
+            n_zero += 1
             continue
         stats["interp_mode"] = interp_mode
         normalize_and_save(folder if folder.endswith('/') else folder + '/',
                            raw, min_distance, max_distance, normalization_manifest,
                            detection_stats=stats)
+        n_ok += 1
+    print(f"\nGripper estimation summary: {n_ok} ok, {n_zero} zero-detection (all-NaN), "
+          f"{no_image_count} without color images")
+    return {"ok": n_ok, "zero": n_zero, "no_images": no_image_count}
 
 
 if __name__ == "__main__":
@@ -600,24 +632,30 @@ if __name__ == "__main__":
     data_path = args.data_folder
     if args.calibrate:
         calibrate(data_path, args.configs, args.output)
+        sys.exit(0)
     elif args.recursive:
         dirs = sorted(d for d in Path(data_path).rglob("episode_*")
                       if d.is_dir())
         if not dirs:
             print(f"No episode directories found under {data_path}")
-        else:
-            print(f"Processing {len(dirs)} episode(s)")
-            dist_plot_path = Path(data_path) / "gripper_distance_distribution.png"
-            process_episodes([str(d) for d in dirs], args.configs, verbose=args.verbose,
-                              dist_plot_path=dist_plot_path, median_filter_size=args.median_filter,
-                              interp_mode=args.interp, use_preprocess=not args.no_preprocess,
-                              use_symmetry=not args.no_symmetry,
-                              spike_threshold=args.spike_threshold,
-                              max_interp_gap=args.max_interp_gap)
+            sys.exit(1)
+        print(f"Processing {len(dirs)} episode(s)")
+        dist_plot_path = Path(data_path) / "gripper_distance_distribution.png"
+        counts = process_episodes([str(d) for d in dirs], args.configs, verbose=args.verbose,
+                                   dist_plot_path=dist_plot_path, median_filter_size=args.median_filter,
+                                   interp_mode=args.interp, use_preprocess=not args.no_preprocess,
+                                   use_symmetry=not args.no_symmetry,
+                                   spike_threshold=args.spike_threshold,
+                                   max_interp_gap=args.max_interp_gap)
     else:
         dist_plot_path = Path(data_path) / "gripper_distance_distribution.png"
-        process_episodes([data_path], args.configs, verbose=args.verbose,
-                          dist_plot_path=dist_plot_path, median_filter_size=args.median_filter,
-                          interp_mode=args.interp, use_preprocess=not args.no_preprocess,
-                          use_symmetry=not args.no_symmetry,
-                          spike_threshold=args.spike_threshold)
+        counts = process_episodes([data_path], args.configs, verbose=args.verbose,
+                                   dist_plot_path=dist_plot_path, median_filter_size=args.median_filter,
+                                   interp_mode=args.interp, use_preprocess=not args.no_preprocess,
+                                   use_symmetry=not args.no_symmetry,
+                                   spike_threshold=args.spike_threshold,
+                                   max_interp_gap=args.max_interp_gap)
+    # Non-zero exit when any episode could not be processed at all (missing
+    # color images). Zero-detection episodes are NOT errors: they produced an
+    # all-NaN series and the verdict belongs to QC (gripper_missing).
+    sys.exit(1 if counts.get("no_images", 0) else 0)

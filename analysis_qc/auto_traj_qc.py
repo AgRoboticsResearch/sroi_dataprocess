@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Automated trajectory QC — programmatic version of the manual R1 review.
 
+SUPERSEDED as a verdict source: F1/E0/E1/V1 now live in visualization/qc.py
+(first_frame_projection / traj_frame_jump categories; HSV red detection;
+thresholds in configs/qc_filters.json). This script's remaining purpose is the
+`tune` mode: rendering detection-window overlays so thresholds can be tuned
+against real frames. `full` mode still runs but uses the legacy RGB red test.
+
 Per episode (reuses the projection pipeline of projection_qc_batch.py):
   F1  frame-count consistency: len(CameraTrajectory.txt) == #color frames == len(gripper_distances)
   E0  strawberry near START: red-pixel count in circle around projected tip at frame 0
@@ -8,8 +14,7 @@ Per episode (reuses the projection pipeline of projection_qc_batch.py):
   V1  max per-frame tip step (mm) <= V_MAX  (trajectory glitch => single-frame jumps)
 
 Usage:
-  python3 auto_traj_qc.py full            # all episodes -> auto_qc.csv (+ stats)
-  python3 auto_traj_qc.py tune <key> ...  # overlay detection windows for given episodes
+  python3 auto_traj_qc.py tune <session-png>/<episode>   # overlay for tuning
 """
 import csv
 import json

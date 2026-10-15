@@ -1,0 +1,5 @@
+{
+  "_doc": "Parameters for repair_trajectory.py (kernel; called by batches/traj_repair_batch.sh). Single source of truth for hole classification and smoothing.",
+  "gap_max_frames": 10,
+  "whittaker_lambda": 1.0
+}

@@ -439,6 +439,7 @@ def create_lerobot_dataset(
     normalization_records: list[tuple[str, dict]] = []
     normalization_missing: list[str] = []
     start_trims: dict[str, int] = {}
+    stream_failures: list[str] = []
 
     # Process each episode
     for ep_idx, (session_name, ep_path) in enumerate(candidates):
@@ -448,36 +449,35 @@ def create_lerobot_dataset(
         # Load trajectory data
         traj_path = ep_path / "CameraTrajectoryTransformed.txt"
         if not traj_path.exists():
-            print(f"Warning: Skipping {label} - no trajectory file found")
+            print(f"ERROR: {label} - no trajectory file found (run SLAM + repair + transform first)")
+            stream_failures.append(f"{label}: no CameraTrajectoryTransformed.txt")
             continue
         timestamps, poses, positions, rotvecs = load_trajectory_data(str(traj_path))
 
         # Load gripper data
         gripper_path = ep_path / "gripper_distances.txt"
         if not gripper_path.exists():
-            print(f"Warning: Skipping {label} - no gripper file found")
+            print(f"ERROR: {label} - no gripper file found (run gripper estimation first)")
+            stream_failures.append(f"{label}: no gripper_distances.txt")
             continue
         gripper_distances = load_gripper_data(str(gripper_path))
 
-        # Ensure all data has the same length
-        min_length = min(len(timestamps), len(gripper_distances))
-        timestamps = timestamps[:min_length]
-        positions = positions[:min_length]
-        rotvecs = rotvecs[:min_length]
-        gripper_distances = gripper_distances[:min_length]
+        image_files = _color_image_files(ep_path)
+
+        # Stream-count assertion: upstream (decode / trajectory repair / gripper
+        # estimation) guarantees all three streams have exactly the frame count.
+        # A mismatch means an upstream step is stale or incomplete — fail loudly
+        # instead of silently truncating a long episode to the shortest stream.
+        if not (len(timestamps) == len(gripper_distances) == len(image_files)):
+            msg = (f"stream counts differ: traj={len(timestamps)} "
+                   f"gripper={len(gripper_distances)} images={len(image_files)} — "
+                   "rerun the upstream steps for this episode")
+            print(f"ERROR: {label}: {msg}")
+            stream_failures.append(f"{label}: {msg}")
+            continue
+        min_length = len(timestamps)
 
         print(f"Episode length: {min_length} frames")
-
-        # Check for image files
-        image_files = _color_image_files(ep_path)
-        if len(image_files) < min_length:
-            print(f"Warning: Only {len(image_files)} images found, but {min_length} frames needed")
-            min_length = min(min_length, len(image_files))
-            # Truncate other arrays
-            timestamps = timestamps[:min_length]
-            positions = positions[:min_length]
-            rotvecs = rotvecs[:min_length]
-            gripper_distances = gripper_distances[:min_length]
 
         # Trim the quasi-static recording head (pause before the hand starts
         # moving); keeps every stream aligned by slicing off the same frames.
@@ -564,6 +564,13 @@ def create_lerobot_dataset(
 
     print(f"\nDataset created with {dataset.num_episodes} episode(s)")
     print(f"Dataset features: {list(dataset.features.keys())}")
+    if stream_failures:
+        print(f"\nERROR: {len(stream_failures)} episode(s) skipped with stream problems:")
+        for f in stream_failures:
+            print(f"  - {f}")
+        dataset.finalize()
+        raise SystemExit(
+            f"Conversion finished with {len(stream_failures)} stream-count failure(s); exiting non-zero.")
     summary_path = _write_gripper_normalization_summary(
         dataset.root, normalization_records, normalization_missing
     )

@@ -27,6 +27,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DECODE_PY="$REPO_DIR/decode_videos.py"
 
+# Interpreter policy: decode needs PyAV, which only the conda `lerobot` env has
+# on this machine (system python3 has no `av`). Pick it explicitly so this
+# script works from any shell, activated or not.
+PY_DECODE="$HOME/miniconda3/envs/lerobot/bin/python"
+if [ ! -x "$PY_DECODE" ]; then
+    # Fallback: any python on PATH that can import av.
+    if command -v python3 >/dev/null 2>&1 && python3 -c "import av" >/dev/null 2>&1; then
+        PY_DECODE="python3"
+    else
+        echo "Error: no python with PyAV found (looked for $HOME/miniconda3/envs/lerobot/bin/python, then python3 with 'av')." >&2
+        echo "Fix: create the conda env (see README) or 'pip install av' into the active python." >&2
+        exit 1
+    fi
+fi
+
 INPUT=""
 PNG_ROOT=""
 JOBS="4"
@@ -147,7 +162,7 @@ decode_one() {
     }
     staged_target="$stage/$name"
     echo "[$idx/$total] decoding $name"
-    if ! python3 "$DECODE_PY" "$session" --recursive -o "$stage" >"$log" 2>&1; then
+    if ! "$PY_DECODE" "$DECODE_PY" "$session" --recursive -o "$stage" >"$log" 2>&1; then
         rm -rf -- "$stage"
         echo "  ERROR: $name (log: $log)"
         record_result "error"

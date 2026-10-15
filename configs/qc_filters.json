@@ -1,61 +1,76 @@
 {
   "_doc": "Filter rules for visualization/qc.py — the single source of truth for thresholds, category metadata, colors, and page layout. qc.py loads this at startup; edit values here instead of editing the script. Pass --filters <path> to override per-run.",
-  "version": 3,
+  "version": 4,
 
   "thresholds": {
     "_doc": "Numeric cutoffs used by classify() and the extent computation.",
-    "static_path_m": 0.1,
-    "flat_gripper_std": 0.05,
     "min_traj_frames": 30,
-    "extent_padding_ratio": 0.05,
-    "extent_padding_min_cm": 0.5,
     "gripper_end_open_threshold": 0.2,
-    "gripper_end_tail": 10
+    "gripper_end_tail": 10,
+    "extent_padding_ratio": 0.05,
+    "extent_padding_min_cm": 0.5
+  },
+
+  "projection": {
+    "_doc": "First-frame projection verdict (strawberry near start tip / below end point) and frame-jump threshold. The tip is treated as a static point in the camera frame; its world path is projected onto color_000000.png with the recorded intrinsics. Red detection is HSV-based (the old RGB test had yellow false positives).",
+    "v_max_mm": 25.0,
+    "dy_px": 35,
+    "r_start_px": 40,
+    "r_end_px": 40,
+    "n_red_min": 150,
+    "red_hsv": {
+      "_doc": "Red hue lives at both ends of the H circle; s/v gates reject white glare and dark shadow.",
+      "hue1_max": 10,
+      "hue2_min": 160,
+      "s_min": 60,
+      "v_min": 60
+    },
+    "extrinsics_config": "configs/camera_gripper_extrinsics_sroi_v2_d405.json"
   },
 
   "categories": {
-    "_doc": "Ordered classification chain. classify() evaluates categories by priority (lowest first); first match wins. Each entry: color (hex), problem (bool — counts against session in summary + sort), priority (int — lower sorts to top of page), rule + description (documentation only).",
+    "_doc": "Ordered classification chain. classify() evaluates categories by priority (lowest first); first match wins. Each entry: color (hex), problem (bool — counts against session in summary + sort), priority (int — lower sorts to top of page), rule + description (documentation only). All check numbers go to the CSV as evidence regardless of the final label, so thresholds can be re-judged without re-scanning.",
 
-    "no_traj": {
+    "not_processed": {
       "color": "#757575",
       "problem": true,
       "priority": 0,
-      "rule": "CameraTrajectoryTransformed.txt missing/empty OR n_traj_frames < thresholds.min_traj_frames",
-      "description": "Trajectory file missing or too short to compute motion"
+      "rule": "trajectory/gripper stream missing, too short, or repair ledger absent",
+      "description": "Plumbing guard: an upstream step did not run — not a data verdict"
     },
-    "all_nan_gripper": {
+    "traj_long_gap": {
       "color": "#c62828",
       "problem": true,
       "priority": 1,
-      "rule": "gripper_distances.txt present but every value is NaN",
-      "description": "AprilTag never detected — no finite signal"
+      "rule": "CameraTrajectory_idx.txt contains rows with state 'invalid' (tracking gap longer than gap_max_frames)",
+      "description": "Long tracking loss — trajectory has NaN rows"
     },
-    "no_gripper": {
-      "color": "#757575",
+    "gripper_missing": {
+      "color": "#ad1457",
       "problem": true,
       "priority": 2,
-      "rule": "gripper_distances.txt missing or empty",
-      "description": "No gripper signal recorded"
+      "rule": "gripper_distances.txt contains ANY NaN (including all-NaN)",
+      "description": "AprilTag signal lost somewhere — action is incomplete"
     },
-    "static": {
-      "color": "#c62828",
-      "problem": true,
-      "priority": 3,
-      "rule": "path_length_m < thresholds.static_path_m",
-      "description": "Trajectory exists but camera barely moved (<1 cm)"
-    },
-    "flat_gripper": {
+    "traj_frame_jump": {
       "color": "#ef6c00",
       "problem": true,
-      "priority": 4,
-      "rule": "motion present AND finite gripper_std < thresholds.flat_gripper_std",
-      "description": "Camera moved but gripper signal has no actuation"
+      "priority": 3,
+      "rule": "max per-frame step of the SMOOTHED trajectory > projection.v_max_mm",
+      "description": "Residual single-frame jump after smoothing — recovery glitch"
     },
-    "gripper_not_closed": {
+    "first_frame_projection": {
       "color": "#6a1b9a",
       "problem": true,
+      "priority": 4,
+      "rule": "red-pixel count in circle around projected tip at frame 0, or below the projected end point, < projection.n_red_min",
+      "description": "No strawberry found at the start tip and/or below the end point (wrong trajectory or bad demo)"
+    },
+    "gripper_not_closed": {
+      "color": "#00838f",
+      "problem": true,
       "priority": 5,
-      "rule": "motion + actuated gripper AND mean of last thresholds.gripper_end_tail finite readings > thresholds.gripper_end_open_threshold",
+      "rule": "mean of last thresholds.gripper_end_tail finite readings > thresholds.gripper_end_open_threshold",
       "description": "Gripper still open at the end — grasp not completed (0=closed, 1=open)"
     },
     "ok": {
@@ -63,7 +78,7 @@
       "problem": false,
       "priority": 6,
       "rule": "otherwise (default branch)",
-      "description": "Non-static motion + valid gripper signal"
+      "description": "All checks passed"
     }
   },
 
@@ -80,17 +95,12 @@
     "figsize_session": [11.0, 2.4],
     "figsize_summary": [11.0, 0.4],
     "figsize_summary_base_height": 1.5,
-
     "outer_hspace": 0.55,
     "outer_wspace": 0.30,
     "inner_wspace": 0.30,
     "outer_margins": [0.04, 0.98, 0.95, 0.04],
-
-    "_doc_rich": "Rich (default) per-episode page = [RGB+projection][3D trajectory][gripper]. Slower (3D over ~1000 eps); pass --simple for the 2D layout above.",
     "episodes_per_row_rich": 2,
     "figsize_session_rich": [13.0, 3.2],
-    "inner_wspace_rich": 0.25,
-
-    "sort_problem_categories_to_top": true
+    "inner_wspace_rich": 0.25
   }
 }
