@@ -390,14 +390,15 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         pts2d = pts2d[finite]
         if len(pts2d) < 2:
             return vmax, None, None
-        h, w = img.shape[:2]
         m = _red_mask_hsv(img)
-        sx, sy = np.clip(pts2d[0], [0, 0], [w - 1, h - 1]).astype(int)
-        red_start = _circle_count(m, int(sx), int(sy), PROJ_R_START)
-        ex, ey = np.clip(pts2d[-1], [0, 0], [w - 1, h - 1]).astype(int)
-        end_cx = int(np.clip(ex, 0, w - 1))
-        end_cy = int(np.clip(ey + PROJ_DY, 0, h - 1))
-        red_end = _circle_count(m, end_cx, end_cy, PROJ_R_END)
+        # Window centers are NOT clipped to the image: a circle that falls
+        # (partly) outside simply counts fewer real pixels, and one fully
+        # outside counts ~0 and fails the rule — "no pixels to look at" is a
+        # fail, not a reason to sample the image border instead.
+        sx, sy = pts2d[0]
+        red_start = _circle_count(m, int(round(sx)), int(round(sy)), PROJ_R_START)
+        ex, ey = pts2d[-1]
+        red_end = _circle_count(m, int(round(ex)), int(round(ey + PROJ_DY)), PROJ_R_END)
         return vmax, red_start, red_end
     except Exception:
         return vmax, None, None
