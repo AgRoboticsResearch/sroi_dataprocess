@@ -51,9 +51,13 @@ bash batches/transform_batch.sh <session-png | data root>
 python3 gripper_estimation_april_tag.py <session-png> --recursive
 #    Zero-detection episodes produce an all-NaN series of the right length (verdict left to QC).
 
-# 6. QC → per-episode episode/qc.json (one-hot flags + verdict + start_frame; human
-#    fields survive re-scans) + a central qc.csv aggregate. All rules/thresholds in configs/qc_filters.json.
-python3 visualization/qc.py <data root> --csv-only -o <output prefix>
+# 6. QC → per-episode episode/qc.json (one-hot flags + verdict + start_frame)
+#    + a central qc.csv aggregate. Default re-run SKIPS episodes that already have
+#    qc.json (human results untouchable; stale ones — inputs newer than qc.json —
+#    are listed). --force re-scans within --force-verdicts (default auto_ok,pending;
+#    manual_ok/rejected stay untouched; human-written fields always survive).
+#    All rules/thresholds in configs/qc_filters.json.
+python3 visualization/qc.py <data root> --csv-only -o <output prefix> [--force]
 
 # 7. Convert to LeRobot (reads each episode's qc.json: auto_ok/manual_ok proceed,
 #    start_frame slices, leading-NaN fallback; unequal stream counts = non-zero exit)

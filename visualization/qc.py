@@ -584,7 +584,7 @@ def classify(pos: np.ndarray | None, grip: np.ndarray | None,
     return "ok"
 
 
-def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
+def scan_episode(episode_dir: Path, keep_arrays: bool = True, write: bool = True) -> EpisodeQC:
     """Compute QC metrics for a single episode directory."""
     poses = _load_poses(episode_dir / "CameraTrajectoryTransformed.txt")
     pos = poses[:, :3, 3] if poses is not None else None
@@ -623,22 +623,99 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
     if keep_arrays:
         e.pos = pos
         e.grip = grip
-    try:
-        write_qc_json(episode_dir, e, flags)
-    except Exception as ex:  # qc.json 写失败不阻塞扫描,但要留痕
-        print(f"WARN: {episode_dir.name}: qc.json write failed: {ex}")
+    if write:
+        try:
+            write_qc_json(episode_dir, e, flags)
+        except Exception as ex:  # qc.json 写失败不阻塞扫描,但要留痕
+            print(f"WARN: {episode_dir.name}: qc.json write failed: {ex}")
     return e
 
 
-def scan_sessions(root: Path, pattern: str = "*-png", keep_arrays: bool = True) -> dict[str, list[EpisodeQC]]:
-    """Scan a session tree, returning {session_name: [EpisodeQC, ...]}."""
+_CATEGORY_ORDER = ("not_processed", "traj_missing", "gripper_missing",
+                   "traj_frame_jump", "first_frame_projection",
+                   "gripper_not_closed")
+
+
+def category_from_flags(flags: dict) -> str:
+    for c in _CATEGORY_ORDER:
+        if flags.get(c):
+            return c
+    return "ok"
+
+
+def _episode_qc_from_json(ep_dir: Path, doc: dict) -> EpisodeQC:
+    """Rebuild a CSV row from an existing qc.json (skip path — no re-scan)."""
+    ev = doc.get("evidence", {})
+    return EpisodeQC(
+        session=ep_dir.parent.name, episode=ep_dir.name, path=str(ep_dir),
+        category=category_from_flags(doc.get("flags", {})),
+        n_traj_frames=int(ev.get("n_traj_frames", 0) or 0),
+        path_length_cm=float(ev.get("path_length_cm", 0) or 0),
+        n_nan_gripper=int(ev.get("n_nan_gripper", 0) or 0),
+        n_invalid_traj=int(ev.get("n_invalid_traj", -1) if ev.get("n_invalid_traj") is not None else -1),
+        vmax_mm=float(ev.get("vmax_mm", 0) or 0),
+        red_start=ev.get("red_start"),
+        red_end=ev.get("red_end"),
+        red_end_min=ev.get("red_end_min"),
+        gripper_end=ev.get("gripper_end"),
+    )
+
+
+def _qc_stale_inputs(ep_dir: Path, qc_fp: Path) -> bool:
+    """True when any evidence input is NEWER than qc.json (data re-processed
+    after the last scan — the stored result may no longer describe the data)."""
+    try:
+        t = qc_fp.stat().st_mtime
+    except OSError:
+        return True
+    for name in ("CameraTrajectoryTransformed.txt", "CameraTrajectory_idx.txt",
+                 "gripper_distances.txt"):
+        f = ep_dir / name
+        if f.exists() and f.stat().st_mtime > t:
+            return True
+    return False
+
+
+def scan_sessions(root: Path, pattern: str = "*-png", keep_arrays: bool = True,
+                  force: bool = False, force_verdicts: set[str] | None = None) -> dict[str, list[EpisodeQC]]:
+    """Scan a session tree, returning {session_name: [EpisodeQC, ...]}.
+
+    Skip/rescan policy (user, 2026-10-17):
+    - DEFAULT: an episode with an existing qc.json is SKIPPED untouched (its
+      human verdict/start_frame can never be clobbered by a plain re-run).
+      Skipped-but-stale episodes (inputs newer than qc.json) are listed.
+    - force=True: re-scan episodes whose verdict is in force_verdicts
+      (default {auto_ok, pending} — human-adjudicated manual_ok/rejected stay
+      untouched unless explicitly included). Human-written fields
+      (start_frame/review_note/reviewed_at, manual verdicts) are preserved on
+      any rescan; only program flags/evidence refresh.
+    """
+    if force_verdicts is None:
+        force_verdicts = {VERDICT_AUTO_OK, VERDICT_PENDING}
     sessions = sorted([d for d in root.glob(pattern) if d.is_dir()])
     out: dict[str, list[EpisodeQC]] = {}
+    global SKIP_STALE_LIST
+    SKIP_STALE_LIST = []
     for s in sessions:
         eps = []
         for ep_dir in sorted(s.glob("episode_*")):
-            if ep_dir.is_dir():
-                eps.append(scan_episode(ep_dir, keep_arrays=keep_arrays))
+            if not ep_dir.is_dir():
+                continue
+            qc_fp = ep_dir / QC_JSON_NAME
+            if qc_fp.exists():
+                try:
+                    doc = json.loads(qc_fp.read_text())
+                except Exception:
+                    doc = None
+                if doc is not None:
+                    verdict = doc.get("verdict")
+                    rescan = force and verdict in force_verdicts
+                    if not rescan:
+                        if _qc_stale_inputs(ep_dir, qc_fp):
+                            SKIP_STALE_LIST.append(f"{s.name}/{ep_dir.name}")
+                        eps.append(_episode_qc_from_json(ep_dir, doc))
+                        continue
+            eps.append(scan_episode(ep_dir, keep_arrays=keep_arrays))
         if eps:
             out[s.name] = eps
     return out
@@ -1031,6 +1108,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-p", "--pattern", default="*-png",
                    help="Session glob pattern (default: *-png)")
     p.add_argument("--csv-only", action="store_true", help="Skip PDF generation")
+    p.add_argument("--force", action="store_true",
+                   help="Re-scan episodes that already have qc.json (default: skip them "
+                        "untouched). Scope: --force-verdicts (default auto_ok,pending — "
+                        "manual_ok/rejected are never re-scanned unless explicitly "
+                        "included, and human fields always survive a re-scan).")
+    p.add_argument("--force-verdicts", default="auto_ok,pending",
+                   help="Comma-separated verdicts to re-scan under --force, or 'all' "
+                        "(default 'auto_ok,pending')")
     p.add_argument("--pdf-only", action="store_true", help="Skip CSV generation")
     p.add_argument("--filters", type=Path, default=None,
                    help="Path to a qc_filters.json override (default: configs/qc_filters.json next to this script)")
@@ -1049,13 +1134,30 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     keep_arrays = not args.csv_only  # only need arrays for PDF
-    session_data = scan_sessions(args.root, pattern=args.pattern, keep_arrays=keep_arrays)
+    fv = args.force_verdicts.strip()
+    force_verdicts = None
+    if args.force:
+        if fv == "all":
+            force_verdicts = {VERDICT_AUTO_OK, VERDICT_PENDING, VERDICT_MANUAL_OK, VERDICT_REJECTED}
+        else:
+            force_verdicts = {v.strip() for v in fv.split(",") if v.strip()}
+    session_data = scan_sessions(args.root, pattern=args.pattern, keep_arrays=keep_arrays,
+                                 force=args.force, force_verdicts=force_verdicts)
     if not session_data:
         print(f"error: no sessions matching {args.pattern} under {args.root}", file=sys.stderr)
         return 1
 
     total_eps = sum(len(v) for v in session_data.values())
-    print(f"Scanned {len(session_data)} session(s), {total_eps} episode(s)")
+    mode = "force-rescan" if args.force else "skip-if-qc.json"
+    print(f"Scanned {len(session_data)} session(s), {total_eps} episode(s) (mode: {mode})")
+    if SKIP_STALE_LIST:
+        print(f"WARN: {len(SKIP_STALE_LIST)} skipped episode(s) have inputs NEWER than "
+              f"their qc.json (data re-processed after the scan) — rerun with --force "
+              f"to refresh (human verdicts survive):")
+        for k in SKIP_STALE_LIST[:15]:
+            print(f"  - {k}")
+        if len(SKIP_STALE_LIST) > 15:
+            print(f"  ... and {len(SKIP_STALE_LIST) - 15} more")
 
     if not args.pdf_only:
         csv_path = args.output.with_suffix(".csv")
