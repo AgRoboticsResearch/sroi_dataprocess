@@ -80,7 +80,7 @@ bash batches/convert_batch.sh <data root> <repo_id> [out root] [--qc-csv <qc.csv
 | `traj_long_gap` | ledger contains `invalid` rows (tracking loss beyond gap_max_frames) |
 | `gripper_missing` | gripper_distances.txt contains ANY NaN (including all-NaN) |
 | `traj_frame_jump` | per-frame step of the SMOOTHED trajectory above projection.v_max_mm |
-| `first_frame_projection` | PHYSICAL window: berry = 40mm sphere, endpoint 25mm above the berry top → window center = projection of (endpoint + 45mm down in the optical frame); radius = 1.5 × fy × 20mm / Z (intrinsics handle near-big/far-small, clamped to [20,100] px); centers never clipped (off-image = 0 red = fail). HSV red < n_red_min=300 fails. END WINDOW ONLY (start window is evidence-only); "berry in frame" and "stopped at the stem" judgments stay manual |
+| `first_frame_projection` | PHYSICAL window: berry = 40mm sphere, pick point 15mm above the berry top → window center = projection of (endpoint + 35mm down in the optical frame); radius = 1.5 × fy × 20mm / Z (intrinsics handle near-big/far-small, clamped to [20,100] px); centers never clipped (off-image = 0 red = fail). HSV red must cover ≥ red_area_fraction (0.15) of the theoretical berry disc area — depth-adaptive threshold (near: more px, far: fewer). END WINDOW ONLY (start window is evidence-only); "berry in frame" and "stopped at the stem" judgments stay manual |
 | `gripper_not_closed` | mean of the last N finite gripper readings above threshold (still open) |
 | `ok` | all checks passed |
 
