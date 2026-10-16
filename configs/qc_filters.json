@@ -14,13 +14,16 @@
     "v_max_mm": 25.0,
     "r_start_px": 40,
     "berry": {
-      "_doc": "Physical end-window model: berry = sphere of berry_diameter (40mm); the PICK POINT (trajectory endpoint) sits end_above_berry_top_m above the berry top, so the berry CENTER is 35mm below the endpoint. Window center = projection of that 3D point (offset along image-down in the optical frame); radius = margin × berry radius scaled by the intrinsics at that depth (near-big/far-small). Pass bar = red_area_fraction × theoretical berry disc area at that depth (near → more pixels required, far → fewer). Window centers are never clipped: fully outside = ~0 red = fail.",
-      "end_above_berry_top_m": 0.015,
-      "berry_radius_m": 0.02,
-      "window_margin": 1.5,
-      "window_r_min_px": 20,
-      "window_r_max_px": 100,
-      "red_area_fraction": 0.15
+      "_doc": "Physical berry-capsule model. The rig camera looks down camera_pitch_deg from horizontal (30 deg mount + ~15 deg operator habit), no roll, so world-down in the optical frame is (0,cos,sin). Berries hang along it. The pick point (trajectory endpoint) sits pick_above_calyx 5-20mm above the calyx (top of a 40mm region sphere), so the berry center lies 25-40mm below the endpoint: the detection REGION is that 40mm sphere swept along world-down, projected to the image (union of sampled discs). The red-pixel THRESHOLD is decoupled from the region: a 30mm all-red berry disc projected at the capsule-top depth (closest, strictest) x red_area_fraction.",
+      "camera_pitch_deg": 32.0,
+      "pick_above_calyx_min_m": 0.005,
+      "pick_above_calyx_max_m": 0.02,
+      "region_radius_m": 0.02,
+      "red_berry_radius_m": 0.015,
+      "capsule_samples": 5,
+      "disc_r_min_px": 8,
+      "red_area_fraction": 0.3,
+      "threshold_center_offset_m": 0.03
     },
     "red_hsv": {
       "_doc": "Red hue lives at both ends of the H circle; s/v gates reject white glare and dark shadow.",

@@ -102,17 +102,25 @@ GRIPPER_END_TAIL: int = 10
 # Projection verdict + frame-jump threshold (from cfg["projection"])
 V_MAX_MM: float = 25.0
 PROJ_R_START: int = 40      # evidence-only start window (fixed radius)
-# Physical end-window model (user, 2026-10-16): berry = 40mm sphere, the pick
-# point (trajectory endpoint) sits 15mm above the berry top → berry CENTER is
-# 35mm below the endpoint. Window = projection of that 3D point; radius scaled
-# by the intrinsics at that depth. The red-pixel threshold is a FRACTION of
-# the theoretical berry disc area at that depth (near → more px, far → fewer).
-BERRY_END_ABOVE_M: float = 0.015   # pick point above berry top
-BERRY_RADIUS_M: float = 0.020      # 40mm-diameter berry
-WINDOW_MARGIN: float = 1.5         # window radius = margin × berry radius
-WINDOW_R_MIN_PX: int = 20
-WINDOW_R_MAX_PX: int = 100
-RED_AREA_FRACTION: float = 0.35    # pass needs red ≥ fraction × berry disc area
+# Physical berry-capsule model (user, 2026-10-16): the rig camera looks down
+# camera_pitch_deg from horizontal (30° mount + ~15° operator habit) with no
+# roll, so WORLD-down in the optical frame is g = (0, cosP, sinP). Ripe berries
+# hang along g. The pick point (trajectory endpoint) sits 5-20mm above the
+# calyx (top of a 40mm region sphere), so the berry CENTER lies somewhere
+# 25-40mm below the endpoint → the detection REGION is a capsule: a 40mm
+# sphere swept along g over that 15mm span, projected to the image (union of
+# sampled discs). The red-pixel THRESHOLD is decoupled from the region: a
+# 30mm all-red berry disc, projected at the capsule-top depth (closest →
+# biggest → strictest), times red_area_fraction (occlusion allowance).
+CAMERA_PITCH_DEG: float = 45.0
+PICK_ABOVE_CALYX_MIN_M: float = 0.005
+PICK_ABOVE_CALYX_MAX_M: float = 0.020
+REGION_RADIUS_M: float = 0.020      # 40mm-diameter region sphere
+RED_BERRY_RADIUS_M: float = 0.015   # 30mm all-red berry for the threshold
+THRESHOLD_CENTER_OFFSET_M: float = 0.030  # depth ref: 30mm below the pick point (user)
+CAPSULE_SAMPLES: int = 5
+DISC_R_MIN_PX: int = 8              # sanity clamp only
+RED_AREA_FRACTION: float = 0.5
 RED_HUE1_MAX: int = 10
 RED_HUE2_MIN: int = 160
 RED_S_MIN: int = 60
@@ -151,8 +159,9 @@ def load_filters(path: Path | None = None) -> None:
     global EXTENT_PADDING_RATIO, EXTENT_PADDING_MIN_CM
     global GRIPPER_END_OPEN_THRESHOLD, GRIPPER_END_TAIL
     global V_MAX_MM, PROJ_R_START
-    global BERRY_END_ABOVE_M, BERRY_RADIUS_M, WINDOW_MARGIN
-    global WINDOW_R_MIN_PX, WINDOW_R_MAX_PX, RED_AREA_FRACTION
+    global CAMERA_PITCH_DEG, PICK_ABOVE_CALYX_MIN_M, PICK_ABOVE_CALYX_MAX_M
+    global REGION_RADIUS_M, RED_BERRY_RADIUS_M, THRESHOLD_CENTER_OFFSET_M
+    global CAPSULE_SAMPLES, DISC_R_MIN_PX, RED_AREA_FRACTION
     global RED_HUE1_MAX, RED_HUE2_MIN, RED_S_MIN, RED_V_MIN, EXTRINSICS_CONFIG
     global CATEGORY_COLORS, CATEGORY_DEFAULT_COLOR, PROBLEM_CATEGORIES, CATEGORY_SORT_ORDER
     global TRAJ_COLOR, GRIP_COLOR, PANEL_BG, GRIPPER_YLIM
@@ -184,12 +193,15 @@ def load_filters(path: Path | None = None) -> None:
     V_MAX_MM = float(p.get("v_max_mm", 25.0))
     PROJ_R_START = int(p.get("r_start_px", 40))
     b = p.get("berry", {})
-    BERRY_END_ABOVE_M = float(b.get("end_above_berry_top_m", 0.015))
-    BERRY_RADIUS_M = float(b.get("berry_radius_m", 0.020))
-    WINDOW_MARGIN = float(b.get("window_margin", 1.5))
-    WINDOW_R_MIN_PX = int(b.get("window_r_min_px", 20))
-    WINDOW_R_MAX_PX = int(b.get("window_r_max_px", 100))
-    RED_AREA_FRACTION = float(b.get("red_area_fraction", 0.35))
+    CAMERA_PITCH_DEG = float(b.get("camera_pitch_deg", 45.0))
+    PICK_ABOVE_CALYX_MIN_M = float(b.get("pick_above_calyx_min_m", 0.005))
+    PICK_ABOVE_CALYX_MAX_M = float(b.get("pick_above_calyx_max_m", 0.020))
+    REGION_RADIUS_M = float(b.get("region_radius_m", 0.020))
+    RED_BERRY_RADIUS_M = float(b.get("red_berry_radius_m", 0.015))
+    THRESHOLD_CENTER_OFFSET_M = float(b.get("threshold_center_offset_m", 0.030))
+    CAPSULE_SAMPLES = int(b.get("capsule_samples", 5))
+    DISC_R_MIN_PX = int(b.get("disc_r_min_px", 8))
+    RED_AREA_FRACTION = float(b.get("red_area_fraction", 0.5))
     hsv = p.get("red_hsv", {})
     RED_HUE1_MAX = int(hsv.get("hue1_max", 10))
     RED_HUE2_MIN = int(hsv.get("hue2_min", 160))
@@ -365,6 +377,47 @@ def _circle_count(mask: np.ndarray, cx: int, cy: int, rad: int) -> int:
     return int((mask & ((xx - cx) ** 2 + (yy - cy) ** 2 <= rad * rad)).sum())
 
 
+def capsule_geometry(p_end_opt: np.ndarray, K: np.ndarray, D: np.ndarray) -> dict:
+    """Capsule detection region for one trajectory endpoint.
+
+    Returns dict with:
+      discs: [(cx, cy, r_px), ...] — sampled sphere discs of the projected
+             capsule (union = detection region; centers NOT clipped to image)
+      z_top: depth of the capsule-top sphere center (closest, for threshold)
+    Assumes no roll; world-down in the optical frame = (0, cosP, sinP).
+    """
+    pitch = np.radians(CAMERA_PITCH_DEG)
+    g = np.array([0.0, np.cos(pitch), np.sin(pitch)])
+    r_m = REGION_RADIUS_M
+    top_off = PICK_ABOVE_CALYX_MIN_M + r_m      # endpoint → capsule-top center
+    bot_off = PICK_ABOVE_CALYX_MAX_M + r_m      # endpoint → capsule-bottom center
+    fy = float(K[1, 1])
+    discs = []
+    for a in np.linspace(top_off, bot_off, CAPSULE_SAMPLES):
+        c3 = p_end_opt + a * g
+        if c3[2] <= 1e-3:
+            discs.append((float("nan"), float("nan"), DISC_R_MIN_PX))
+            continue
+        c2, _ = cv2.projectPoints(c3.astype(np.float64).reshape(1, 1, 3),
+                                  np.zeros(3), np.zeros(3), K, D)
+        r_px = int(round(max(DISC_R_MIN_PX, fy * r_m / c3[2])))
+        discs.append((float(c2[0, 0, 0]), float(c2[0, 0, 1]), r_px))
+    z_thr = float((p_end_opt + THRESHOLD_CENTER_OFFSET_M * g)[2])
+    return {"discs": discs, "z_top": z_thr}
+
+
+def capsule_region_mask(shape: tuple[int, int], discs: list) -> np.ndarray:
+    """Boolean mask of the projected capsule (union of the sampled discs)."""
+    h, w = shape
+    m = np.zeros((h, w), dtype=bool)
+    yy, xx = np.ogrid[:h, :w]
+    for cx, cy, r in discs:
+        if not np.isfinite(cx) or not np.isfinite(cy):
+            continue
+        m |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+    return m
+
+
 def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, int | None, int | None]:
     """First-frame projection verdict inputs + per-frame max step.
 
@@ -410,25 +463,18 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         sx, sy = pts2d[0]
         red_start = _circle_count(m, int(round(sx)), int(round(sy)), PROJ_R_START)
 
-        # End window from the physical berry model: place the berry CENTER in 3D
-        # (endpoint + [end_above + radius] straight down in the image plane) and
-        # project it; size the radius by the intrinsics at that depth. Window
-        # centers are NOT clipped: a circle outside the image counts ~0 and
-        # fails — "no pixels to look at" is a fail.
+        # Capsule detection region from the physical berry model (see
+        # capsule_geometry). Region and threshold are DECOUPLED: the region is
+        # the projected 40mm-sphere capsule along the assumed world-vertical;
+        # the threshold is the projected 30mm all-red berry at the capsule-top
+        # depth (closest → biggest → strictest) times the occlusion fraction.
         p_end = pts_opt[-1]
-        berry = p_end + np.array([0.0, BERRY_END_ABOVE_M + BERRY_RADIUS_M, 0.0])
-        bc, _ = cv2.projectPoints(berry.astype(np.float64).reshape(1, 1, 3),
-                                  np.zeros(3), np.zeros(3), K, D)
-        bcx, bcy = float(bc[0, 0, 0]), float(bc[0, 0, 1])
+        geo = capsule_geometry(p_end, K, D)
+        region = capsule_region_mask(m.shape, geo["discs"])
+        red_end = int((m & region).sum())
         fy = float(K[1, 1])
-        r_px = int(round(np.clip(WINDOW_MARGIN * fy * BERRY_RADIUS_M / max(berry[2], 1e-6),
-                                 WINDOW_R_MIN_PX, WINDOW_R_MAX_PX)))
-        red_end = _circle_count(m, int(round(bcx)), int(round(bcy)), r_px)
-        # Depth-scaled threshold: a fixed pixel count would ask far more of a
-        # near berry (huge window) than a far one (tiny window). The pass bar
-        # is a fraction of the theoretical berry disc area at this depth.
-        r_berry_px = fy * BERRY_RADIUS_M / max(berry[2], 1e-6)
-        red_end_min = RED_AREA_FRACTION * np.pi * r_berry_px ** 2
+        r_red_px = fy * RED_BERRY_RADIUS_M / max(geo["z_top"], 1e-3)  # z_top = 30mm-depth ref
+        red_end_min = RED_AREA_FRACTION * np.pi * r_red_px ** 2
         return vmax, red_start, red_end, red_end_min
     except Exception:
         return vmax, None, None, None
