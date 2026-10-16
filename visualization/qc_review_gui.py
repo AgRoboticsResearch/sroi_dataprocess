@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import cv2
 import numpy as np
@@ -353,10 +353,10 @@ class Handler(BaseHTTPRequestHandler):
                                 "start_frame": doc.get("start_frame", 0)})
                 self._json(out)
             elif u.path.startswith("/api/qc/"):
-                key = u.path[len("/api/qc/"):]
+                key = unquote(u.path[len("/api/qc/"):])
                 self._json(STORE.eps[key]["qc"])
             elif u.path.startswith("/api/traj/"):
-                key = u.path[len("/api/traj/"):]
+                key = unquote(u.path[len("/api/traj/"):])
                 t = STORE.trajectory(key)
                 poses = t["poses"]
                 self._json({
@@ -367,7 +367,7 @@ class Handler(BaseHTTPRequestHandler):
                                for v in p[:3].reshape(-1)] for p in poses],
                 })
             elif u.path.startswith("/frame/"):
-                key = u.path[len("/frame/"):]
+                key = unquote(u.path[len("/frame/"):])
                 i = int(q.get("i", ["0"])[0])
                 b = render_frame(key, i, q.get("fut", ["0"])[0] == "1",
                                  q.get("mask", ["0"])[0] == "1", q.get("reg", ["0"])[0] == "1")
@@ -380,12 +380,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
         except Exception as e:
+            import traceback
+            traceback.print_exc(flush=True)
             self._json({"error": str(e)}, 500)
 
     def do_POST(self):
         u = urlparse(self.path)
         if u.path.startswith("/api/qc/"):
-            key = u.path[len("/api/qc/"):]
+            key = unquote(u.path[len("/api/qc/"):])
             d = STORE.eps.get(key)
             if d is None:
                 return self._json({"ok": False, "error": "no such episode"}, 404)
