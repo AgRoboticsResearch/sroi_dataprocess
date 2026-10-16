@@ -254,7 +254,7 @@ function src(){const e=EPS[cur];const q=`?i=${i}&fut=${$('tFut').checked?1:0}&ma
   return '/frame/'+encodeURIComponent(e.key)+q;}
 function show(){$('frame').src=src();$('slider').value=i;$('frameNo').textContent=`${i} / ${N-1}`;
   const cut=(QC.start_frame||0)>i;$('frame').classList.toggle('cut',cut);
-  $('hud').textContent=`f${i}/${N-1}  ts=${TR.times[i]??'-'}  grip=${TR.grip[i]??'-'}`;
+  $('hud').textContent=`f${i}/${N-1}  ts=${(TR.times&&TR.times[i])??'-'}  grip=${(TR.grip&&TR.grip[i])??'-'}`;
   if(TR.poses&&TR.poses[i]){const p=TR.poses[i];const tb=document.getElementById('poseT');
     if(tb){let h='';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<4;c++)h+=`<td>${p[r*4+c]}</td>`;h+='</tr>';}tb.innerHTML=h;}}}
 function step(d){i=Math.max(0,Math.min(N-1,i+d));show();}
@@ -300,18 +300,25 @@ $('slider').oninput=e=>{i=parseInt(e.target.value);show();};
 $('filter').onchange=()=>{cur=0;loadList();};
 $('play').onclick=play;
 const t2=document.createElement('div');t2.id='toast';document.body.appendChild(t2);
+window.onerror=(m,src,l,c)=>{const b=document.createElement('div');
+b.style.cssText='position:fixed;top:0;left:0;right:0;background:#8a1c1c;color:#fff;padding:6px 12px;font:12px monospace;z-index:99';
+b.textContent='JS错误: '+m+' @'+l+':'+c;document.body.appendChild(b);};
+window.addEventListener('unhandledrejection',e=>{const b=document.createElement('div');
+b.style.cssText='position:fixed;top:26px;left:0;right:0;background:#7a5a1c;color:#fff;padding:6px 12px;font:12px monospace;z-index:99';
+b.textContent='Promise错误: '+(e.reason&&e.reason.message||e.reason);document.body.appendChild(b);});
 (async()=>{$('root').textContent=(await (await fetch('/api/root')).json()).root;await loadList();})();
 </script></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
+    def log_message(self, fmt, *a):
+        print("[http]", fmt % a, flush=True)
 
     def _json(self, obj, code=200):
         b = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
@@ -323,6 +330,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/" :
                 b = PAGE.encode()
                 self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
             elif u.path == "/api/root":
                 self._json({"root": str(STORE.root)})
