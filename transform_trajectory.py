@@ -19,7 +19,68 @@ import numpy as np
 import os
 import sys
 import argparse
+import json
 from pathlib import Path
+
+
+
+
+# ----------------------------------------------------------------------------
+# Whittaker smoothing (moved here from the repair step, 2026-10-17: keeps
+# CameraTrajectory.txt pristine so dropping non-raw ledger rows reconstructs
+# the exact K-row SLAM output). Segments are contiguous finite runs; rotation
+# goes through rot6d + Gram-Schmidt reprojection, never matrix averaging.
+# ----------------------------------------------------------------------------
+
+def _load_smooth_config(path):
+    if path and Path(path).exists():
+        with open(path) as f:
+            return json.load(f)
+    return {"whittaker_lambda": 1.0}
+
+
+def _whittaker(p: np.ndarray, lam: float) -> np.ndarray:
+    n = len(p)
+    D = np.zeros((n - 2, n))
+    idx = np.arange(n - 2)
+    D[idx, idx] = 1.0
+    D[idx, idx + 1] = -2.0
+    D[idx, idx + 2] = 1.0
+    return np.linalg.solve(np.eye(n) + lam * (D.T @ D), p)
+
+
+def _rot6d_from_R(R):
+    return np.concatenate([R[:, :, 0], R[:, :, 1]], axis=1)
+
+
+def _R_from_rot6d(r6):
+    a, b = r6[:, :3], r6[:, 3:]
+    a1 = a / np.linalg.norm(a, axis=1, keepdims=True)
+    b1 = b - (b * a1).sum(1, keepdims=True) * a1
+    b1 = b1 / np.linalg.norm(b1, axis=1, keepdims=True)
+    return np.stack([a1, b1, np.cross(a1, b1)], axis=2)
+
+
+def _smooth_segments(traj: np.ndarray, lam: float) -> np.ndarray:
+    """Smooth contiguous finite segments of an (N,4,4) trajectory in place
+    (positions directly, rotations via rot6d + Gram-Schmidt). NaN rows are
+    hard segment boundaries and pass through untouched."""
+    n = len(traj)
+    finite = np.isfinite(traj[:, :3, 3]).all(axis=1) & np.isfinite(traj[:, :3, :3]).all(axis=(1, 2))
+    i = 0
+    while i < n:
+        if not finite[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and finite[j]:
+            j += 1
+        if j - i >= 3:
+            seg = slice(i, j)
+            traj[seg, :3, 3] = _whittaker(traj[seg, :3, 3], lam)
+            traj[seg, :3, :3] = _R_from_rot6d(_whittaker(_rot6d_from_R(traj[seg, :3, :3]), lam))
+        i = j
+    return traj
 
 
 def load_trajectory_data(folder_path):
@@ -171,7 +232,7 @@ def save_transformed_trajectory(traj_transformed, timestamps, output_path):
             f.write(formatted_line + '\n')
 
 
-def process_folder(folder_path, output_path=None):
+def process_folder(folder_path, output_path=None, smooth=True, lam=1.0):
     """Process a single folder containing trajectory data."""
     if not output_path:
         output_path = folder_path / "CameraTrajectoryTransformed.txt"
@@ -186,6 +247,9 @@ def process_folder(folder_path, output_path=None):
         traj, timestamps = load_trajectory_data(str(folder_path))
         print(f"Loaded {len(traj)} trajectory poses and {len(timestamps)} timestamps")
 
+        if smooth:
+            print(f"Smoothing (Whittaker lambda={lam})...")
+            traj = _smooth_segments(traj, lam)
         print("Transforming trajectory to initial camera frame...")
         traj_transformed = transform_trajectory(traj)
         
@@ -234,6 +298,16 @@ Examples:
     )
     
     parser.add_argument(
+        '--no-smooth',
+        action='store_true',
+        help='Skip Whittaker smoothing (default: smooth, lambda from config)'
+    )
+    parser.add_argument(
+        '--smooth-config',
+        default=str(Path(__file__).resolve().parent / "configs" / "transform_trajectory.json"),
+        help='JSON with whittaker_lambda (default: configs/transform_trajectory.json)'
+    )
+    parser.add_argument(
         '--recursive',
         action='store_true',
         help='Recursively search for folders containing times.txt and CameraTrajectory.txt'
@@ -259,7 +333,9 @@ Examples:
             current_dir = Path(root)
             if (current_dir / "times.txt").exists() and (current_dir / "CameraTrajectory.txt").exists():
                 out_path = Path(args.output) if args.output else None
-                if process_folder(current_dir, out_path):
+                if process_folder(current_dir, out_path,
+                                  smooth=not args.no_smooth,
+                                  lam=float(_load_smooth_config(args.smooth_config).get("whittaker_lambda", 1.0))):
                     processed_count += 1
                 else:
                     failed_count += 1
@@ -273,7 +349,9 @@ Examples:
             print(f"To search subdirectories, use the --recursive flag.")
             sys.exit(1)
 
-        sys.exit(0 if process_folder(folder_path, out_path) else 1)
+        sys.exit(0 if process_folder(folder_path, out_path,
+                                      smooth=not args.no_smooth,
+                                      lam=float(_load_smooth_config(args.smooth_config).get("whittaker_lambda", 1.0))) else 1)
 
 
 if __name__ == "__main__":

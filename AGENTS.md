@@ -37,14 +37,14 @@ bash batches/orbslam_batch_local.sh <session>-png ~/code/ORB_SLAM3 true false \
     --mask-config configs/gripper_mask_sroi_v2_d405.json
 
 # 3. Trajectory repair: ledger alignment → missing frames become NaN + "invalid"
-#    (NO interpolation — corpus-verified: ORB-SLAM3 yields a pose for every frame
-#    after init succeeds, so gaps only occur as initialization heads) → segment-wise
-#    Whittaker smoothing (λ=1, pos + rot6d + Gram-Schmidt) → atomic rewrite to N×12 + 3-col ledger.
-#    Params: configs/traj_repair.json
+#    (NO interpolation, NO smoothing — raw rows keep PRISTINE SLAM values, so
+#    dropping non-raw rows reconstructs the exact K-row output) → atomic rewrite
+#    to N×12 + 3-col ledger.
 bash batches/traj_repair_batch.sh <session-png | data root> [--force] [--no-smooth]
 
-# 4. Coordinate transform (optical → camera_link X-fwd/Y-left/Z-up; timestamps via the ledger's
-#    frame ids; hard-fails if repair has not run)
+# 4. Smooth + coordinate transform (segment-wise Whittaker λ from
+#    configs/transform_trajectory.json, then optical → camera_link X-fwd/Y-left/Z-up;
+#    timestamps via the ledger's frame ids; hard-fails if repair has not run)
 bash batches/transform_batch.sh <session-png | data root>
 
 # 5. Gripper recovery (session-level entry: the normalization range is pooled per session)

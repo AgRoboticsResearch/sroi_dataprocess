@@ -8,17 +8,18 @@ Inputs per episode (produced by the patched ORB-SLAM3 build):
   CameraTrajectory.txt       K lines x 12 cols (K <= N; compacted by tracking loss)
   CameraTrajectory_idx.txt   K lines x 1 col  (frame index of each pose row)
 
-What it does (order is fixed by design: align -> mark holes -> smooth):
+What it does (order is fixed by design: align -> mark holes):
   1. Place each pose row into its true frame slot via the ledger.
   2. Every missing frame becomes NaN + state "invalid" — NO interpolation.
      Rationale (corpus-verified 2026-10-16): ORB-SLAM3 pushes a pose for every
      frame once initialization succeeds (OK || RECENTLY_LOST both append), so
      gaps are initialization-head gaps only (6/1138 episodes, all at the head,
      zero mid-episode). Inventing poses is unjustified; consumers head-trim.
-  3. Whittaker smoothing (lambda from config) per contiguous finite segment;
-     NaN rows are hard boundaries and stay NaN. Rotation goes through rot6d +
-     Gram-Schmidt reprojection (never smooth rotation matrices directly).
-  4. Atomically rewrite in place (tmp file -> fsync -> os.replace):
+  3. NO smoothing here (moved to transform_trajectory.py): raw rows keep the
+     PRISTINE SLAM values, so dropping non-raw rows reconstructs the exact
+     K-row SLAM output. The 'state' column reserves 'interp' should hole
+     interpolation ever return.
+  3. Atomically rewrite in place (tmp file -> fsync -> os.replace):
        CameraTrajectory.txt      N lines x 12 cols  (NaN rows for invalid frames)
        CameraTrajectory_idx.txt  N lines x 3 cols:  <frame> <state> <seg_len>
      state: raw | invalid. seg_len: length of the invalid run (0 for raw). The raw K-row state is fully
@@ -30,8 +31,7 @@ idx has 3 columns; that is also the idempotent skip criterion. Re-running SLAM
 with skip_existing=false regresses the files to K rows / 1 col -- re-run repair.
 
 Usage:
-    python3 repair_trajectory.py <episode-or-session> [--recursive] \
-        [--config configs/traj_repair.json] [--force] [--no-smooth]
+    python3 repair_trajectory.py <episode-or-session> [--recursive] [--force]
 """
 
 import argparse
@@ -45,58 +45,6 @@ import numpy as np
 TRAJ_NAME = "CameraTrajectory.txt"
 IDX_NAME = "CameraTrajectory_idx.txt"
 TIMES_NAME = "times.txt"
-
-DEFAULT_CONFIG = str(Path(__file__).resolve().parent / "configs" / "traj_repair.json")
-
-DEFAULTS = {"whittaker_lambda": 1.0}
-
-
-def load_config(path):
-    cfg = dict(DEFAULTS)
-    if path and Path(path).exists():
-        with open(path) as f:
-            cfg.update(json.load(f))
-    return cfg
-
-
-# ----------------------------------------------------------------------------
-# Whittaker smoother (same formulation as analysis_qc/smooth_trajectories.py)
-# ----------------------------------------------------------------------------
-
-def whittaker(p: np.ndarray, lam: float) -> np.ndarray:
-    """Smooth columns of p (n, d) with a second-difference penalty."""
-    n = len(p)
-    D = np.zeros((n - 2, n))
-    idx = np.arange(n - 2)
-    D[idx, idx] = 1.0
-    D[idx, idx + 1] = -2.0
-    D[idx, idx + 2] = 1.0
-    return np.linalg.solve(np.eye(n) + lam * (D.T @ D), p)
-
-
-def rot6d_from_R(R: np.ndarray) -> np.ndarray:
-    """R (n,3,3) -> (n,6): first two columns."""
-    return np.concatenate([R[:, :, 0], R[:, :, 1]], axis=1)
-
-
-def R_from_rot6d(r6: np.ndarray) -> np.ndarray:
-    """r6 (n,6) -> (n,3,3) via Gram-Schmidt reprojection."""
-    a, b = r6[:, :3], r6[:, 3:]
-    a1 = a / np.linalg.norm(a, axis=1, keepdims=True)
-    b1 = b - (b * a1).sum(1, keepdims=True) * a1
-    b1 = b1 / np.linalg.norm(b1, axis=1, keepdims=True)
-    c1 = np.cross(a1, b1)
-    return np.stack([a1, b1, c1], axis=2)
-
-
-def smooth_segment(pos: np.ndarray, R: np.ndarray, lam: float) -> tuple[np.ndarray, np.ndarray]:
-    """Smooth one contiguous valid segment (positions + rotation via rot6d)."""
-    if len(pos) < 3:
-        return pos, R  # too short to smooth; harmless
-    pos_s = whittaker(pos, lam)
-    r6_s = whittaker(rot6d_from_R(R), lam)
-    return pos_s, R_from_rot6d(r6_s)
-
 
 # ----------------------------------------------------------------------------
 # Repair
@@ -121,7 +69,7 @@ def find_holes(ids: np.ndarray, n: int) -> list[tuple[int, int, str]]:
     return holes
 
 
-def repair_episode(ep: Path, cfg: dict, smooth: bool = True, force: bool = False) -> str:
+def repair_episode(ep: Path, force: bool = False) -> str:
     """Repair one episode directory. Returns 'ok' | 'skip' | 'error: ...'."""
     traj_fp, idx_fp, times_fp = ep / TRAJ_NAME, ep / IDX_NAME, ep / TIMES_NAME
     for fp in (times_fp, traj_fp, idx_fp):
@@ -196,23 +144,6 @@ def repair_episode(ep: Path, cfg: dict, smooth: bool = True, force: bool = False
         seg_len[i:j] = j - i
         i = j
 
-    # 3. Segment-wise Whittaker smoothing over finite (raw) runs.
-    if smooth:
-        lam = float(cfg["whittaker_lambda"])
-        valid = state == "raw"
-        i = 0
-        while i < n:
-            if not valid[i]:
-                i += 1
-                continue
-            j = i
-            while j < n and valid[j]:
-                j += 1
-            pos_s, R_s = smooth_segment(poses[i:j, :3, 3], poses[i:j, :3, :3], lam)
-            poses[i:j, :3, 3] = pos_s
-            poses[i:j, :3, :3] = R_s
-            i = j
-
     # Self-check: invalid rows must be all-NaN, others finite.
     invalid_rows = state == "invalid"
     if invalid_rows.any() and not np.isnan(poses[invalid_rows, :3, :]).all():
@@ -252,9 +183,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("root", type=str, help="episode dir or session/data root")
     ap.add_argument("--recursive", action="store_true", help="search episode_* dirs recursively")
-    ap.add_argument("--config", default=DEFAULT_CONFIG)
     ap.add_argument("--force", action="store_true", help="re-repair even if already repaired")
-    ap.add_argument("--no-smooth", action="store_true", help="skip Whittaker smoothing")
     args = ap.parse_args()
 
     root = Path(args.root)
@@ -262,10 +191,9 @@ def main():
         print(f"Error: {root} does not exist")
         sys.exit(1)
 
-    cfg = load_config(args.config)
     n_ok = n_skip = n_err = 0
     for ep in iter_episodes(root):
-        res = repair_episode(ep, cfg, smooth=not args.no_smooth, force=args.force)
+        res = repair_episode(ep, force=args.force)
         tag = res.split(":")[0]
         print(f"{ep.parent.name}/{ep.name}: {res}")
         if tag == "ok":

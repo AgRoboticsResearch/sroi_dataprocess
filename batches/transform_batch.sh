@@ -1,11 +1,11 @@
 #!/bin/bash
 # Robust outer layer for transform_trajectory.py (kernel — do not call directly).
 #
-# Rewrites the REPAIRED trajectory into the camera_link frame (X-forward,
-# Y-left, Z-up) as CameraTrajectoryTransformed.txt (13 cols: timestamp + 3x4),
-# taking timestamps through the ledger's frame ids. Hard-fails (non-zero exit)
-# if repair has not run: rows must equal frames and NaN rows must match the
-# ledger's invalid rows.
+# Smooths (Whittaker, lambda from configs/transform_trajectory.json; --no-smooth
+# to skip) then converts to the camera_link frame (X-forward, Y-left, Z-up) as
+# CameraTrajectoryTransformed.txt (13 cols: timestamp + 3x4), taking timestamps
+# through the ledger's frame ids. Hard-fails (non-zero exit) if repair has not
+# run: rows must equal frames and NaN rows must match the ledger's invalid rows.
 #
 # Usage:
 #   bash batches/transform_batch.sh <episode | session-png | data root>

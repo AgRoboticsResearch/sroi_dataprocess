@@ -1,0 +1,4 @@
+{
+  "_doc": "Smoothing parameters for transform_trajectory.py (the repair step no longer smooths — CameraTrajectory.txt keeps pristine SLAM values). Whittaker second-difference penalty, applied per contiguous finite segment; rotation via rot6d + Gram-Schmidt reprojection.",
+  "whittaker_lambda": 1.0
+}
