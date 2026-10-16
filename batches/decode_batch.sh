@@ -8,13 +8,14 @@
 #   ./decode_batch.sh <input> [png_root] [--jobs N]
 #
 #   <input>:    a day-folder (containing *-mp4 sessions) or a single *-mp4 session.
-#   [png_root]: root dir for the decoded -png sessions (default: <day>/_png).
+#   [png_root]: root dir for the decoded -png sessions (default: alongside the
+#               -mp4 folders — sibling layout, same as the existing corpus).
 #               Each session decodes to <png_root>/<ts>-png/episode_*/.
 #   --jobs N:   concurrent session decodes (default 4).
 #
 # Examples:
 #   ./decode_batch.sh /data/20260728-occluded-cases
-#       -> /data/20260728-occluded-cases/_png/<ts>-png/...
+#       -> /data/20260728-occluded-cases/<ts>-png/... (siblings of the -mp4 dirs)
 #   ./decode_batch.sh /data/20260728-occluded-cases /tmp/pngout --jobs 8
 #   ./decode_batch.sh /data/20260728-occluded-cases/20260728_200203-mp4
 #
@@ -66,7 +67,7 @@ PNG_ROOT="${_positionals[1]:-}"
 if [ -z "$INPUT" ]; then
     echo "Usage: $0 <input> [png_root] [--jobs N]"
     echo "  input:    day-folder (with *-mp4 sessions) or a single *-mp4 session"
-    echo "  png_root: where -png sessions go (default: <day>/_png)"
+    echo "  png_root: where -png sessions go (default: alongside the -mp4 folders)"
     echo "  --jobs N: concurrent session decodes (default 4)"
     exit 1
 fi
@@ -100,14 +101,17 @@ else
     fi
 fi
 
-PNG_ROOT="${PNG_ROOT:-$DAY_DIR/_png}"
+# Default PNG root: the mp4's own parent dir, i.e. -png sessions are created
+# as SIBLINGS of the -mp4 folders (matches the existing corpus layout; the
+# episode dirs under the -png tree are the live working tree, not scratch).
+PNG_ROOT="${PNG_ROOT:-$DAY_DIR}"
 PNG_ROOT="${PNG_ROOT%/}"
 mkdir -p "$PNG_ROOT"
 LOG_DIR="$PNG_ROOT/.decode_logs"
 mkdir -p "$LOG_DIR"
 
 echo "============================================"
-echo "Decode to separate PNG root"
+echo "Decode to PNG root"
 echo "============================================"
 echo "Input:     $INPUT"
 echo "PNG root:  $PNG_ROOT"
