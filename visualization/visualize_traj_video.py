@@ -248,10 +248,18 @@ def render_episode_video(ep_dir: Path, fps: int, codec: str, dpi: int = 100,
     pos = poses[:, :3, 3]
 
     # Full-traj extent (fixed axes, padded) for a stable 3D view.
-    pad = max((pos.max(axis=0) - pos.min(axis=0)).max() * 0.08, 0.02)
-    lo = pos.min(axis=0) - pad
-    hi = pos.max(axis=0) + pad
-    path_len = float(np.sum(np.linalg.norm(np.diff(pos, axis=0), axis=1)))
+    # NaN-safe: repaired trajectories keep invalid (long-gap) rows as NaN —
+    # exclude them from the extent and the path length.
+    finite = pos[np.isfinite(pos).all(axis=1)]
+    if len(finite) < 2:
+        print(f"  skip {ep_dir.name}: no finite poses")
+        plt.close(fig)
+        return False
+    pad = max((finite.max(axis=0) - finite.min(axis=0)).max() * 0.08, 0.02)
+    lo = finite.min(axis=0) - pad
+    hi = finite.max(axis=0) + pad
+    steps = np.linalg.norm(np.diff(pos, axis=0), axis=1)
+    path_len = float(np.nansum(steps))
 
     # Figure: left = color frame (+ projected future traj), middle = 3D trajectory,
     # right = the full gripper-openness curve with a moving current-frame marker.
