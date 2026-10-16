@@ -141,50 +141,45 @@ def _write_gripper_normalization_summary(
     return destination
 
 
-def _load_qc_csv(qc_csv: str | Path) -> dict[str, dict[str, str]]:
-    """Read qc.csv into {session_name: {episode_name: category}}.
+QC_JSON_NAME = "qc.json"
+QC_PASS_VERDICTS = {"auto_ok", "manual_ok"}
 
-    qc.csv columns (output of visualization/qc.py): session, episode, category, ...
+
+def _load_episode_qc(ep_dir: Path) -> dict | None:
+    """Read the episode-local qc.json (source of truth written by
+    visualization/qc.py; human review updates verdict/start_frame in place).
+
+    Returns None when the file is missing (QC has not run for this episode).
     """
-    qc_path = Path(qc_csv)
-    if not qc_path.exists():
-        raise FileNotFoundError(f"QC CSV not found: {qc_path}")
-    out: dict[str, dict[str, str]] = {}
-    with qc_path.open(newline="") as f:
-        for row in csv.DictReader(f):
-            out.setdefault(row["session"], {})[row["episode"]] = row["category"]
-    return out
+    fp = ep_dir / QC_JSON_NAME
+    if not fp.exists():
+        return None
+    try:
+        return json.loads(fp.read_text())
+    except Exception as e:
+        raise ValueError(f"{fp}: unparsable qc.json ({e})") from e
 
 
 def _collect_episodes(
     data_path: Path,
-    qc_csv: str | Path | None,
-    qc_categories: str,
     episodes: str,
 ) -> tuple[list[tuple[str, Path]], bool]:
     """Auto-detect single-episode / single-session / multi-session mode and return
     the work list.
 
     Returns (candidates, is_multi_session) where candidates is a list of
-    (session_name, episode_dir) tuples in deterministic sorted order. QC filter
-    is applied per-session when qc_csv is provided.
+    (session_name, episode_dir) tuples in deterministic sorted order. QC
+    filtering is NOT applied here — the per-episode qc.json verdict is checked
+    in the processing loop.
     """
-    if qc_csv is not None and episodes != "all":
-        raise ValueError("--qc_csv and --episodes are mutually exclusive.")
-
     # Mode 1: single episode directory (backward compat)
     if (data_path / "CameraTrajectoryTransformed.txt").exists():
-        if qc_csv is not None:
-            print(f"Warning: --qc_csv ignored; {data_path.name} is a single episode.")
         return [(data_path.parent.name, data_path)], False
-
-    qc_data = _load_qc_csv(qc_csv) if qc_csv else None
-    keep = {c.strip() for c in qc_categories.split(",") if c.strip()} if qc_csv else None
 
     # Mode 2: single session (episode_* dirs directly under data_path)
     direct = sorted([d for d in data_path.iterdir() if _is_episode_dir(d)])
     if direct:
-        kept = _apply_session_filter(data_path.name, direct, qc_data, keep, episodes)
+        kept = _apply_session_filter(data_path.name, direct, None, None, episodes)
         return [(data_path.name, ep) for ep in kept], False
 
     # Mode 3: multi-session (subdirs each containing decoded episode_* folders).
@@ -201,7 +196,7 @@ def _collect_episodes(
         eps = sorted([d for d in s.iterdir() if d.is_dir() and d.name.startswith("episode_")])
         if not eps:
             continue
-        kept = _apply_session_filter(s.name, eps, qc_data, keep, "all")
+        kept = _apply_session_filter(s.name, eps, None, None, "all")
         for ep in kept:
             candidates.append((s.name, ep))
 
@@ -344,8 +339,6 @@ def create_lerobot_dataset(
     single_task: str = "End-effector manipulation task",
     episodes: str = "all",
     num_workers: int = 4,
-    qc_csv: str | None = None,
-    qc_categories: str = "ok",
     trim_start: bool = True,
 ):
     """
@@ -362,18 +355,15 @@ def create_lerobot_dataset(
         push_to_hub: Whether to push to Hugging Face Hub
         single_task: Task description
         episodes: Comma-separated episode names (single-session mode only);
-            "all" converts every episode. Mutually exclusive with --qc_csv.
-            Ambiguous in multi-session mode (use --qc_csv instead).
+            "all" converts every episode.
         num_workers: Parallel workers for image loading
-        qc_csv: Optional path to a qc.csv from visualization/qc.py. Episodes are
-            filtered per session to those whose category is in qc_categories.
-        qc_categories: Comma-separated category names to keep when qc_csv is set
-            (default: "ok"). E.g. "ok,traj_long_gap" to also keep long-gap runs.
+        QC: per-episode qc.json next to the data is the source of truth
+            (verdict auto_ok/manual_ok pass; start_frame slices the head).
         trim_start: Drop the quasi-static head frames of each episode (see
             find_start_trim_count). Counts are recorded in meta/start_trim.json.
     """
     data_path = Path(data_path)
-    candidates, is_multi_session = _collect_episodes(data_path, qc_csv, qc_categories, episodes)
+    candidates, is_multi_session = _collect_episodes(data_path, episodes)
     mode = "multi-session" if is_multi_session else "single-session/episode"
     print(f"Mode: {mode}, {len(candidates)} episode(s) to convert")
 
@@ -439,12 +429,33 @@ def create_lerobot_dataset(
     normalization_records: list[tuple[str, dict]] = []
     normalization_missing: list[str] = []
     start_trims: dict[str, int] = {}
+    nan_head_trims: dict[str, int] = {}
+    manual_start_frames: dict[str, int] = {}
     stream_failures: list[str] = []
+    qc_skipped: list[str] = []
 
     # Process each episode
     for ep_idx, (session_name, ep_path) in enumerate(candidates):
         label = f"{session_name}/{ep_path.name}" if is_multi_session else ep_path.name
         print(f"\n--- Processing episode {ep_idx + 1}/{len(candidates)}: {label} ---")
+
+        # Per-episode QC gate (source of truth: episode-local qc.json written
+        # by visualization/qc.py; human review updates verdict/start_frame).
+        try:
+            ep_qc = _load_episode_qc(ep_path)
+        except ValueError as e:
+            print(f"ERROR: {label}: {e}")
+            stream_failures.append(f"{label}: unparsable qc.json")
+            continue
+        if ep_qc is None:
+            print(f"ERROR: {label}: no qc.json (run visualization/qc.py first)")
+            stream_failures.append(f"{label}: missing qc.json")
+            continue
+        verdict = ep_qc.get("verdict")
+        if verdict not in QC_PASS_VERDICTS:
+            qc_skipped.append(f"{label} [{verdict}]")
+            continue
+        start_frame = max(0, int(ep_qc.get("start_frame") or 0))
 
         # Load trajectory data
         traj_path = ep_path / "CameraTrajectoryTransformed.txt"
@@ -476,6 +487,51 @@ def create_lerobot_dataset(
             stream_failures.append(f"{label}: {msg}")
             continue
         min_length = len(timestamps)
+
+        # Manual start frame (human review): slice every stream from the
+        # chosen frame (0 for normal episodes). Applies BEFORE the NaN
+        # fallback and the quasi-static trim, which then judge relative to
+        # the new effective start.
+        if start_frame > 0:
+            if start_frame >= min_length:
+                msg = f"start_frame {start_frame} >= episode length {min_length}"
+                print(f"ERROR: {label}: {msg}")
+                stream_failures.append(f"{label}: {msg}")
+                continue
+            timestamps = timestamps[start_frame:]
+            positions = positions[start_frame:]
+            rotvecs = rotvecs[start_frame:]
+            gripper_distances = gripper_distances[start_frame:]
+            image_files = image_files[start_frame:]
+            min_length -= start_frame
+            manual_start_frames[label] = start_frame
+            print(f"Sliced to manual start_frame={start_frame}; {min_length} remain")
+
+        # Leading-NaN head trim (user, 2026-10-16): episodes whose trajectory
+        # has fewer valid poses than frames are initialization-head gaps
+        # (corpus-verified: ORB-SLAM3 never drops frames after init). Cut the
+        # leading NaN rows from every stream and record the cut; a NaN AFTER
+        # the first valid row would be a mid-episode gap — that episode fails
+        # (never silently shipped as NaN actions).
+        finite = np.isfinite(positions).all(axis=1)
+        first_valid = int(np.argmax(finite)) if finite.any() else min_length
+        if first_valid > 0 or not finite.any():
+            if not finite.any() or not finite[first_valid:].all():
+                msg = ("all-NaN trajectory" if not finite.any()
+                       else f"NaN rows after first valid frame (mid-gap at "
+                            f"{int(np.argmax(~finite[first_valid:])) + first_valid})")
+                print(f"ERROR: {label}: {msg}")
+                stream_failures.append(f"{label}: {msg}")
+                continue
+            timestamps = timestamps[first_valid:]
+            positions = positions[first_valid:]
+            rotvecs = rotvecs[first_valid:]
+            gripper_distances = gripper_distances[first_valid:]
+            image_files = image_files[first_valid:]
+            min_length -= first_valid
+            nan_head_trims[label] = first_valid
+            print(f"Trimmed {first_valid} leading-NaN frame(s) (init-head gap); "
+                  f"{min_length} remain")
 
         print(f"Episode length: {min_length} frames")
 
@@ -564,6 +620,12 @@ def create_lerobot_dataset(
 
     print(f"\nDataset created with {dataset.num_episodes} episode(s)")
     print(f"Dataset features: {list(dataset.features.keys())}")
+    if qc_skipped:
+        print(f"\nQC skipped {len(qc_skipped)} episode(s) (not failures):")
+        for k in qc_skipped[:20]:
+            print(f"  - {k}")
+        if len(qc_skipped) > 20:
+            print(f"  ... and {len(qc_skipped) - 20} more")
     if stream_failures:
         print(f"\nERROR: {len(stream_failures)} episode(s) skipped with stream problems:")
         for f in stream_failures:
@@ -585,6 +647,13 @@ def create_lerobot_dataset(
             },
             "episodes_trimmed": len(start_trims),
             "start_trim_frames": start_trims,
+            "nan_head_trim": {
+                "episodes_trimmed": len(nan_head_trims),
+                "frames_cut": nan_head_trims,
+                "note": "initialization-head NaN rows cut before conversion",
+            },
+            "manual_start_frames": manual_start_frames,
+            "qc_skipped_episodes": len(qc_skipped),
         }
         trim_path = dataset.root / "meta" / "start_trim.json"
         with trim_path.open("w") as f:
@@ -655,20 +724,6 @@ def main():
         help="Number of parallel workers for image loading (default: 4, use 1 for sequential)"
     )
     parser.add_argument(
-        "--qc_csv",
-        type=str,
-        default=None,
-        help="Path to a qc.csv from visualization/qc.py. Filters episodes by category for each "
-             "session under --data_path. Mutually exclusive with --episodes."
-    )
-    parser.add_argument(
-        "--qc_categories",
-        type=str,
-        default="ok",
-        help="Comma-separated QC categories to keep when --qc_csv is set (default: 'ok'). "
-             "Example: 'ok,traj_long_gap'."
-    )
-    parser.add_argument(
         "--no_trim_start",
         action="store_true",
         help="Disable trimming of the quasi-static recording head (default: trim on; "
@@ -694,8 +749,6 @@ def main():
         single_task=args.task,
         episodes=args.episodes,
         num_workers=args.num_workers,
-        qc_csv=args.qc_csv,
-        qc_categories=args.qc_categories,
         trim_start=not args.no_trim_start,
     )
     

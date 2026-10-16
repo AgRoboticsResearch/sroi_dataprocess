@@ -8,24 +8,20 @@ Inputs per episode (produced by the patched ORB-SLAM3 build):
   CameraTrajectory.txt       K lines x 12 cols (K <= N; compacted by tracking loss)
   CameraTrajectory_idx.txt   K lines x 1 col  (frame index of each pose row)
 
-What it does (order is fixed by design: align -> fill holes -> smooth):
+What it does (order is fixed by design: align -> mark holes -> smooth):
   1. Place each pose row into its true frame slot via the ledger.
-  2. Holes (missing frame indices):
-     - short hole (<= gap_max), interior: linear interp on positions,
-       slerp on rotations                       -> state "interp"
-     - short hole at the head:   fill with first valid pose (quasi-static
-       recording head)                           -> state "interp"
-     - short hole at the tail:   linear extrapolation on positions
-       (constant per-frame velocity), rotation held -> state "interp"
-     - long hole (> gap_max):    NaN, no invention               -> state "invalid"
-  3. Whittaker smoothing (lambda from config) per VALID segment (raw+interp);
-     invalid segments are hard boundaries and stay NaN. Rotation goes through
-     rot6d + Gram-Schmidt reprojection (never smooth rotation matrices directly).
+  2. Every missing frame becomes NaN + state "invalid" — NO interpolation.
+     Rationale (corpus-verified 2026-10-16): ORB-SLAM3 pushes a pose for every
+     frame once initialization succeeds (OK || RECENTLY_LOST both append), so
+     gaps are initialization-head gaps only (6/1138 episodes, all at the head,
+     zero mid-episode). Inventing poses is unjustified; consumers head-trim.
+  3. Whittaker smoothing (lambda from config) per contiguous finite segment;
+     NaN rows are hard boundaries and stay NaN. Rotation goes through rot6d +
+     Gram-Schmidt reprojection (never smooth rotation matrices directly).
   4. Atomically rewrite in place (tmp file -> fsync -> os.replace):
        CameraTrajectory.txt      N lines x 12 cols  (NaN rows for invalid frames)
        CameraTrajectory_idx.txt  N lines x 3 cols:  <frame> <state> <seg_len>
-     state: raw | interp | invalid. seg_len: length of the hole run for
-     interp/invalid rows, 0 for raw rows. The raw K-row state is fully
+     state: raw | invalid. seg_len: length of the invalid run (0 for raw). The raw K-row state is fully
      reconstructible from these two files (drop non-raw rows), so no raw
      backup file is kept.
 
@@ -45,7 +41,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
 
 TRAJ_NAME = "CameraTrajectory.txt"
 IDX_NAME = "CameraTrajectory_idx.txt"
@@ -53,7 +48,7 @@ TIMES_NAME = "times.txt"
 
 DEFAULT_CONFIG = str(Path(__file__).resolve().parent / "configs" / "traj_repair.json")
 
-DEFAULTS = {"gap_max_frames": 10, "whittaker_lambda": 1.0}
+DEFAULTS = {"whittaker_lambda": 1.0}
 
 
 def load_config(path):
@@ -184,53 +179,27 @@ def repair_episode(ep: Path, cfg: dict, smooth: bool = True, force: bool = False
     state = np.array(["invalid"] * n, dtype=object)
     state[ids] = "raw"
 
-    # 2. Fill holes.
-    gap_max = int(cfg["gap_max_frames"])
+    # 2. Mark holes: every missing frame stays NaN + "invalid" (no interpolation).
     for start, end, where in find_holes(ids, n):
-        length = end - start
-        if length > gap_max:
-            continue  # stays NaN / invalid
-        if where == "head":
-            poses[start:end] = poses[end]  # freeze at first valid (quasi-static head)
-        elif where == "tail":
-            if len(ids) >= 2:
-                i1, i2 = ids[-2], ids[-1]  # two last valid frames
-                v = (poses[i2, :3, 3] - poses[i1, :3, 3]) / (i2 - i1)
-                for t in range(start, end):
-                    poses[t, :3, 3] = poses[i2, :3, 3] + v * (t - i2)
-                    poses[t, :3, :3] = poses[i2, :3, :3]
-                    poses[t, 3, :] = bottom
-            else:
-                poses[start:end] = poses[ids[0]]  # single valid frame: freeze
-        else:  # interior
-            a, b = start - 1, end  # neighboring valid frames (guaranteed: interior)
-            pa, pb = poses[a, :3, 3], poses[b, :3, 3]
-            ra, rb = poses[a, :3, :3], poses[b, :3, :3]
-            slerp = Slerp([0.0, 1.0], Rotation.from_matrix(np.stack([ra, rb])))
-            for t in range(start, end):
-                alpha = (t - a) / (b - a)
-                poses[t, :3, 3] = (1 - alpha) * pa + alpha * pb
-                poses[t, :3, :3] = slerp(float(alpha)).as_matrix()
-                poses[t, 3, :] = bottom
-        state[start:end] = "interp"
+        pass  # poses were initialized to NaN; state already "invalid"
 
-    # Segment lengths for interp/invalid runs (0 for raw).
+    # Segment lengths for invalid runs (0 for raw).
     seg_len = np.zeros(n, dtype=np.int64)
     i = 0
     while i < n:
-        if state[i] == "raw":
+        if state[i] != "invalid":
             i += 1
             continue
         j = i
-        while j < n and state[j] == state[i]:
+        while j < n and state[j] == "invalid":
             j += 1
         seg_len[i:j] = j - i
         i = j
 
-    # 3. Segment-wise Whittaker smoothing over valid (raw+interp) runs.
+    # 3. Segment-wise Whittaker smoothing over finite (raw) runs.
     if smooth:
         lam = float(cfg["whittaker_lambda"])
-        valid = state != "invalid"
+        valid = state == "raw"
         i = 0
         while i < n:
             if not valid[i]:

@@ -36,31 +36,8 @@ fi
 
 [ -d "$DATA_ROOT" ] || { echo "Error: data root '$DATA_ROOT' not found" >&2; exit 1; }
 
-DEFAULTS=()
-# Default QC filter: prefer a qc.csv next to the data root, else the repo root
-QC_DEFAULT=""
-if [ -f "$DATA_ROOT/qc.csv" ]; then
-    QC_DEFAULT="$DATA_ROOT/qc.csv"
-elif [ -f "$REPO_DIR/qc.csv" ]; then
-    QC_DEFAULT="$REPO_DIR/qc.csv"
-fi
-if [ -n "$QC_DEFAULT" ]; then
-    DEFAULTS=(--fps 30 --qc_csv "$QC_DEFAULT")
-else
-    DEFAULTS=(--fps 30)
-fi
-
-EXTRA=()
-for a in "$@"; do
-    EXTRA+=("$a")
-done
-
-# Drop the default --qc_csv if caller passed their own or --no-qc
-for a in "$@"; do
-    case "$a" in
-        --qc-csv|--qc_csv|--no-qc) DEFAULTS=();;
-    esac
-done
-
+# QC filtering is per-episode: each episode dir carries its own qc.json
+# (verdict + start_frame), written by visualization/qc.py and updated by
+# human review. No central csv needed here.
 exec "$PY_CONV" "$CONVERT_PY" --data_path "$DATA_ROOT" --repo_id "$REPO_ID" \
-    ${OUT_ROOT:+--root "$OUT_ROOT"} "${DEFAULTS[@]}" "${EXTRA[@]}"
+    --fps 30 ${OUT_ROOT:+--root "$OUT_ROOT"} "$@"

@@ -36,8 +36,9 @@ bash batches/decode_batch.sh <day-dir | <session>-mp4> [png_root] [--jobs 4]
 bash batches/orbslam_batch_local.sh <session>-png ~/code/ORB_SLAM3 true false \
     --mask-config configs/gripper_mask_sroi_v2_d405.json
 
-# 3. Trajectory repair: ledger alignment → short-hole interpolation (linear pos + slerp rot;
-#    head freeze / tail extrapolation) → long holes stay NaN (invalid) → segment-wise
+# 3. Trajectory repair: ledger alignment → missing frames become NaN + "invalid"
+#    (NO interpolation — corpus-verified: ORB-SLAM3 yields a pose for every frame
+#    after init succeeds, so gaps only occur as initialization heads) → segment-wise
 #    Whittaker smoothing (λ=1, pos + rot6d + Gram-Schmidt) → atomic rewrite to N×12 + 3-col ledger.
 #    Params: configs/traj_repair.json
 bash batches/traj_repair_batch.sh <session-png | data root> [--force] [--no-smooth]
@@ -50,11 +51,13 @@ bash batches/transform_batch.sh <session-png | data root>
 python3 gripper_estimation_april_tag.py <session-png> --recursive
 #    Zero-detection episodes produce an all-NaN series of the right length (verdict left to QC).
 
-# 6. QC → qc.csv (+ optional PDF). All rules/thresholds live in configs/qc_filters.json.
+# 6. QC → per-episode episode/qc.json (one-hot flags + verdict + start_frame; human
+#    fields survive re-scans) + a central qc.csv aggregate. All rules/thresholds in configs/qc_filters.json.
 python3 visualization/qc.py <data root> --csv-only -o <output prefix>
 
-# 7. Convert to LeRobot (executes the QC verdict; unequal stream counts = non-zero exit, never silent truncation)
-bash batches/convert_batch.sh <data root> <repo_id> [out root] [--qc-csv <qc.csv> | --no-qc]
+# 7. Convert to LeRobot (reads each episode's qc.json: auto_ok/manual_ok proceed,
+#    start_frame slices, leading-NaN fallback; unequal stream counts = non-zero exit)
+bash batches/convert_batch.sh <data root> <repo_id> [out root]
 ```
 
 **Re-run safety**: decode (resumes partial), SLAM (skips when output exists), repair (idempotent;
@@ -77,7 +80,7 @@ bash batches/convert_batch.sh <data root> <repo_id> [out root] [--qc-csv <qc.csv
 | category | rule |
 |---|---|
 | `not_processed` | trajectory/gripper stream missing, too short, or ledger absent (plumbing guard) |
-| `traj_long_gap` | ledger contains `invalid` rows (tracking loss beyond gap_max_frames) |
+| `traj_missing` | ledger contains `invalid` rows (tracking loss beyond gap_max_frames) |
 | `gripper_missing` | gripper_distances.txt contains ANY NaN (including all-NaN) |
 | `traj_frame_jump` | per-frame step of the SMOOTHED trajectory above projection.v_max_mm |
 | `first_frame_projection` | CAPSULE model: camera pitched 32° down (30° mount + ~2° habit, no roll) → world-vertical g=(0,cos,sin) in the optical frame. Pick point sits 5-20mm above the calyx → berry center 25-40mm below the endpoint: a 40mm region sphere swept along g forms the detection CAPSULE, projected as a union of sampled discs. Threshold decoupled from the region: a 30mm all-red berry projected at the "30mm below endpoint" depth × red_area_fraction (0.3, occlusion allowance). HSV H≤10/≥160, s≥60, v≥60 (grid sweep showed tightening is strictly worse). Rendering: merged thin contour; near-plane (z≥3cm) + FOV (≤45°) clipping |

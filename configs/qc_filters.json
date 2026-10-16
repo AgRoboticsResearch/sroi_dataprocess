@@ -43,13 +43,6 @@
       "rule": "trajectory/gripper stream missing, too short, or repair ledger absent",
       "description": "Plumbing guard: an upstream step did not run — not a data verdict"
     },
-    "traj_long_gap": {
-      "color": "#c62828",
-      "problem": true,
-      "priority": 1,
-      "rule": "CameraTrajectory_idx.txt contains rows with state 'invalid' (tracking gap longer than gap_max_frames)",
-      "description": "Long tracking loss — trajectory has NaN rows"
-    },
     "gripper_missing": {
       "color": "#ad1457",
       "problem": true,
@@ -84,6 +77,13 @@
       "priority": 6,
       "rule": "otherwise (default branch)",
       "description": "All checks passed"
+    },
+    "traj_missing": {
+      "color": "#c62828",
+      "problem": true,
+      "priority": 1,
+      "rule": "ledger contains 'invalid' rows — valid pose count < frame count (corpus: initialization-head gaps only)",
+      "description": "Trajectory has NaN rows; head-trim review decides keep-or-drop"
     }
   },
   "display": {

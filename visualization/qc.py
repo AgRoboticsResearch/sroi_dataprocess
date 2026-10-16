@@ -49,7 +49,7 @@ Categories (per episode), evaluated in priority order (first match wins;
 evidence columns keep every check's numbers regardless of the final label):
     not_processed           - trajectory/gripper stream missing or too short
                               (plumbing guard: an upstream step did not run)
-    traj_long_gap           - trajectory ledger has 'invalid' rows (long tracking loss)
+    traj_missing           - trajectory ledger has 'invalid' rows (long tracking loss)
     gripper_missing         - gripper_distances.txt contains any NaN (incl. all-NaN)
     traj_frame_jump         - per-frame step above threshold on the SMOOTHED trajectory
     first_frame_projection  - projected tip path on the first color frame finds no
@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -480,6 +481,81 @@ def _projection_evidence(episode_dir: Path, poses: np.ndarray) -> tuple[float, i
         return vmax, None, None, None
 
 
+QC_JSON_NAME = "qc.json"
+VERDICT_AUTO_OK, VERDICT_PENDING, VERDICT_MANUAL_OK, VERDICT_REJECTED = \
+    "auto_ok", "pending", "manual_ok", "rejected"
+
+
+def compute_flags(pos, grip, n_invalid, vmax_mm, red_end, red_end_min) -> dict:
+    """One-hot check flags — INDEPENDENT booleans, no priority chain (an
+    episode can be gripper_not_closed AND first_frame_projection at once)."""
+    flags = {k: False for k in ("not_processed", "traj_missing", "gripper_missing",
+                                "traj_frame_jump", "first_frame_projection",
+                                "gripper_not_closed")}
+    if pos is None or len(pos) < MIN_TRAJ_FRAMES or grip is None or len(grip) == 0 \
+            or n_invalid < 0:
+        flags["not_processed"] = True
+        return flags
+    if n_invalid > 0:
+        flags["traj_missing"] = True
+    if not np.isfinite(grip).all():
+        flags["gripper_missing"] = True
+    if vmax_mm > V_MAX_MM:
+        flags["traj_frame_jump"] = True
+    if red_end is not None and red_end_min is not None and red_end < red_end_min:
+        flags["first_frame_projection"] = True
+    end = _gripper_end_value(grip)
+    if end is not None and end > GRIPPER_END_OPEN_THRESHOLD:
+        flags["gripper_not_closed"] = True
+    return flags
+
+
+def write_qc_json(episode_dir: Path, e: "EpisodeQC", flags: dict) -> None:
+    """Write episode-local qc.json. HUMAN fields (manual_ok/rejected verdict,
+    start_frame, review_note, reviewed_at) are PRESERVED on re-scan; only the
+    program-computed fields are refreshed. auto_ok is recomputed each run."""
+    fp = episode_dir / QC_JSON_NAME
+    old = {}
+    if fp.exists():
+        try:
+            old = json.loads(fp.read_text())
+        except Exception:
+            old = {}
+    prev_verdict = old.get("verdict")
+    if prev_verdict in (VERDICT_MANUAL_OK, VERDICT_REJECTED):
+        verdict = prev_verdict
+    else:
+        verdict = VERDICT_AUTO_OK if not any(flags.values()) else VERDICT_PENDING
+    doc = {
+        "schema_version": 2,
+        "session": e.session,
+        "episode": e.episode,
+        "flags": flags,
+        "evidence": {
+            "path_length_cm": round(e.path_length_cm, 2),
+            "n_traj_frames": e.n_traj_frames,
+            "n_invalid_traj": e.n_invalid_traj,
+            "vmax_mm": round(e.vmax_mm, 2),
+            "red_start": e.red_start,
+            "red_end": e.red_end,
+            "red_end_min": e.red_end_min,
+            "n_nan_gripper": e.n_nan_gripper,
+            "gripper_end": e.gripper_end,
+            "gripper_std": round(e.gripper_std, 4) if e.gripper_std else 0.0,
+        },
+        "verdict": verdict,
+        "start_frame": old.get("start_frame", 0),
+        "reviewed_at": old.get("reviewed_at"),
+        "review_note": old.get("review_note", ""),
+        "scanned_at": old.get("scanned_at"),  # refreshed below
+    }
+    from datetime import datetime
+    doc["scanned_at"] = datetime.now().isoformat(timespec="seconds")
+    tmp = fp.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+    os.replace(tmp, fp)
+
+
 def classify(pos: np.ndarray | None, grip: np.ndarray | None,
              n_invalid_traj: int = 0, vmax_mm: float = 0.0,
              red_start: int | None = None, red_end: int | None = None,
@@ -489,7 +565,7 @@ def classify(pos: np.ndarray | None, grip: np.ndarray | None,
     if pos is None or len(pos) < MIN_TRAJ_FRAMES or grip is None or len(grip) == 0:
         return "not_processed"
     if n_invalid_traj != 0:  # >0 = long gap present; -1 = repair not run
-        return "traj_long_gap" if n_invalid_traj > 0 else "not_processed"
+        return "traj_missing" if n_invalid_traj > 0 else "not_processed"
     if not np.isfinite(grip).all():
         return "gripper_missing"
     if vmax_mm > V_MAX_MM:
@@ -519,6 +595,7 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
     if poses is not None and len(poses) >= 2:
         vmax_mm, red_start, red_end, red_end_min = _projection_evidence(episode_dir, poses)
     cat = classify(pos, grip, n_invalid, vmax_mm, red_start, red_end, red_end_min)
+    flags = compute_flags(pos, grip, n_invalid, vmax_mm, red_end, red_end_min)
 
     e = EpisodeQC(
         session=episode_dir.parent.name,
@@ -546,6 +623,10 @@ def scan_episode(episode_dir: Path, keep_arrays: bool = True) -> EpisodeQC:
     if keep_arrays:
         e.pos = pos
         e.grip = grip
+    try:
+        write_qc_json(episode_dir, e, flags)
+    except Exception as ex:  # qc.json 写失败不阻塞扫描,但要留痕
+        print(f"WARN: {episode_dir.name}: qc.json write failed: {ex}")
     return e
 
 

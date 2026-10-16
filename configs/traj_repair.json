@@ -1,5 +1,4 @@
 {
-  "_doc": "Parameters for repair_trajectory.py (kernel; called by batches/traj_repair_batch.sh). Single source of truth for hole classification and smoothing.",
-  "gap_max_frames": 10,
+  "_doc": "Parameters for repair_trajectory.py: align via ledger, mark missing frames as NaN/invalid (no interpolation — corpus-verified init-head gaps only), segment-wise Whittaker smoothing.",
   "whittaker_lambda": 1.0
 }

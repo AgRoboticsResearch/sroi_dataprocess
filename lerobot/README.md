@@ -87,7 +87,7 @@ python /home/zfei/code/sroi_rosbag_utilities/lerobot/sroi_to_lerobot.py \
     --num_workers 4
 ```
 
-`--qc_categories` is comma-separated, e.g. `ok,traj_long_gap`. `--episodes` is still available for single-session conversion, but it is intentionally rejected in multi-session mode because names like `episode_001` occur in every session.
+`--qc_categories` is comma-separated, e.g. `ok,traj_missing`. `--episodes` is still available for single-session conversion, but it is intentionally rejected in multi-session mode because names like `episode_001` occur in every session.
 
 To push the created dataset to the Hugging Face Hub add `--push_to_hub` and provide a `--repo_id` that you own.
 
