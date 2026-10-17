@@ -300,7 +300,8 @@ const $=id=>document.getElementById(id);
 const FCOL={not_processed:'#8b93a0',traj_missing:'#c62828',gripper_missing:'#ad1457',traj_frame_jump:'#ef6c00',first_frame_projection:'#6a1b9a',gripper_not_closed:'#00838f'};
 let EPSALL=[],SESS='all';
 async function loadList(){EPSALL=await (await fetch('/api/episodes?filter='+$('filter').value)).json();
-  const sesss=[...new Set(EPSALL.map(e=>e.key.split('/')[0]))].sort();
+  const allEps=await (await fetch('/api/episodes?filter=all')).json();
+  const sesss=[...new Set(allEps.map(e=>e.key.split('/')[0]))].sort();
   const sel=$('sess'),old=sel.value;
   sel.innerHTML='<option value="all">全部 session</option>'+sesss.map(x=>`<option>${x}</option>`).join('');
   if(sesss.includes(old))sel.value=old;else SESS=sel.value='all';
@@ -308,7 +309,9 @@ async function loadList(){EPSALL=await (await fetch('/api/episodes?filter='+$('f
 function applySession(){EPS=SESS==='all'?EPSALL:EPSALL.filter(e=>e.key.split('/')[0]===SESS);
   $('count').textContent=EPS.length+' 集';
   if(cur>=EPS.length)cur=-1; renderList(); if(cur<0&&EPS.length){cur=0;loadEp();}}
-function renderList(){const L=$('list');L.innerHTML='';EPS.forEach((e,k)=>{const d=document.createElement('div');
+function renderList(){const L=$('list');L.innerHTML='';
+  if(!EPS.length){L.innerHTML='<div style="padding:20px;color:var(--dim);font-size:12px">当前过滤条件下没有 episode（若在复核完成后出现，切到"全部"即可浏览）</div>';return;}
+  EPS.forEach((e,k)=>{const d=document.createElement('div');
   d.className='ep'+(k===cur?' on':'');const fl=Object.entries(e.flags||{}).filter(([k,v])=>v).map(([k])=>`<span class="fdot" title="${k}" style="background:${FCOL[k]||'#888'}"></span>`).join('');
   d.innerHTML=`<div class="name">${e.key.split('/')[1]} <span style="color:var(--dim);font-size:10px">${e.key.split('/')[0].slice(9,-4)}</span></div>
   <div class="meta"><span class="chip v-${e.verdict}">${e.verdict}</span>${fl}${e.start_frame?`<span style="color:var(--pend);font-size:10px">start=${e.start_frame}</span>`:''}</div>`;
