@@ -282,7 +282,7 @@ textarea{width:100%;min-height:64px;background:var(--bg);color:var(--fg);border:
 </header>
 <div id="main">
   <div id="list"></div>
-  <div id="stage"><div id="hud"></div><img id="frame" draggable="false"></div>
+  <div id="stage"><img id="frame" draggable="false"></div>
   <div id="side"></div>
 </div>
 <div id="bar">
@@ -319,7 +319,6 @@ function src(){const e=EPS[cur];
   return '/frame/'+encodeURIComponent(e.key)+`?i=${i}&ov=${$('tOv').checked?1:0}`;}
 function show(){$('frame').src=src();$('slider').value=i;$('frameNo').textContent=`${i} / ${N-1}`;
   const cut=(QC.start_frame||0)>i;$('frame').classList.toggle('cut',cut);
-  $('hud').textContent=`f${i}/${N-1}  ts=${(TR.times&&TR.times[i])??'-'}  grip=${(TR.grip&&TR.grip[i])??'-'}`;
   if(TR.poses&&TR.poses[i]){const p=TR.poses[i];const tb=document.getElementById('poseT');
     if(tb){let h='';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<4;c++)h+=`<td>${p[r*4+c]}</td>`;h+='</tr>';}tb.innerHTML=h;}}
   drawGrip();draw3d();}
@@ -335,16 +334,18 @@ function drawGrip(){const c=document.getElementById('gcurve');if(!c||!TR||!TR.gr
   const sf=(QC&&QC.start_frame)||0;if(sf>0){ctx.strokeStyle='#d9a441';ctx.setLineDash([4,3]);
     ctx.beginPath();ctx.moveTo(sf/(n-1)*W,0);ctx.lineTo(sf/(n-1)*W,H);ctx.stroke();ctx.setLineDash([]);}
   ctx.strokeStyle='#4da3ff';ctx.lineWidth=2;ctx.beginPath();
-  ctx.moveTo(i/(n-1)*W,0);ctx.lineTo(i/(n-1)*W,H);ctx.stroke();ctx.lineWidth=1;}
+  ctx.moveTo(i/(n-1)*W,0);ctx.lineTo(i/(n-1)*W,H);ctx.stroke();ctx.lineWidth=1;
+  const gv=document.getElementById('gval');
+  if(gv){const v=g[i];gv.textContent=v==null?'开度 NaN':'开度 '+v.toFixed(3);}}
 function draw3d(){const c=document.getElementById('traj3d');if(!c||!TR||!TR.xyz)return;
   const ctx=c.getContext('2d'),W=c.width,H=c.height;
   ctx.fillStyle='#fafafa';ctx.fillRect(0,0,W,H);
   const pts=TR.xyz,n=pts.length;if(!n)return;
   let lo=[1e9,1e9,1e9],hi=[-1e9,-1e9,-1e9];
   for(const p of pts)if(p)p.forEach((v,k)=>{lo[k]=Math.min(lo[k],v);hi[k]=Math.max(hi[k],v);});
-  const c30=Math.cos(Math.PI/6),s30=Math.sin(Math.PI/6);
-  const pr=p=>{if(!p)return null;const x=(p[0]-lo[0])/((hi[0]-lo[0])||1)-.5,y=(p[1]-lo[1])/((hi[1]-lo[1])||1)-.5,z=(p[2]-lo[2])/((hi[2]-lo[2])||1)-.5;
-    return [W/2+(x-y)*c30*W*0.35, H/2+(x+y)*s30*H*0.55-z*H*0.5];};
+  // 俯视: 从 +Z 向下看 XY 平面 (X→屏幕右, Y→屏幕上)
+  const pr=p=>{if(!p)return null;const x=(p[0]-lo[0])/((hi[0]-lo[0])||1)-.5,y=(p[1]-lo[1])/((hi[1]-lo[1])||1)-.5;
+    return [W/2+x*W*0.8, H/2-y*H*0.8];};
   // 全程淡线 + 渐进亮线
   ctx.strokeStyle='#cfcfcf';ctx.beginPath();let m=0;
   for(const p of pts){const q=pr(p);if(!q){m=1;continue}m?ctx.moveTo(q[0],q[1]):ctx.lineTo(q[0],q[1]);m=0;}
@@ -366,8 +367,8 @@ function stop(){playing=false;clearInterval(timer);$('play').textContent='▶';}
 function renderSide(){const e=EPS[cur];const fl=Object.entries(QC.flags||{}).filter(([k,v])=>v);
   const evi=QC.evidence||{};
   $('side').innerHTML=`
-  <div class="sec"><h3>轨迹 3D (camera_link, 随帧渐进)</h3><canvas id="traj3d" width="290" height="200" style="width:100%"></canvas></div>
-  <div class="sec"><h3>夹爪曲线 (点击跳帧)</h3><canvas id="gcurve" width="290" height="90" style="width:100%;cursor:crosshair"></canvas></div>
+  <div class="sec"><h3>轨迹俯视 XY (camera_link, Z 向下看)</h3><canvas id="traj3d" width="290" height="200" style="width:100%"></canvas></div>
+  <div class="sec"><h3>夹爪曲线 <span id="gval" style="float:right;font-family:var(--mono);color:var(--acc)"></span></h3><canvas id="gcurve" width="290" height="90" style="width:100%;cursor:crosshair"></canvas></div>
   <div class="sec"><h3>当前帧位姿 (camera_link 3×4)</h3><table class="pose"><tbody id="poseT"></tbody></table></div>
   <div class="sec"><h3>FLAGS</h3><div class="flags">${fl.length?fl.map(([k])=>`<span class="chip" style="background:${FCOL[k]||'#333'}22;color:${FCOL[k]}">${k}</span>`).join(''):'<span style="color:var(--ok)">无</span>'}</div>
     <div class="evi" style="margin-top:8px">
