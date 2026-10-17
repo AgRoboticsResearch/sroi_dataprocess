@@ -142,20 +142,17 @@ def start_prerender(key: str):
 
 def _prerender_worker(key: str, total: int):
     d = _cache_dir(key)
-    combos = [(1, 1), (0, 1), (1, 0), (0, 0)]   # (fut, reg); mask 走实时
-    done = 0
     for i in range(total):
-        for fut, reg in combos:
-            fp = d / f"f{i:05d}_f{int(fut)}r{int(reg)}.jpg"
+        for ov in (1, 0):
+            fp = d / f"f{i:05d}_o{ov}.jpg"
             if not fp.exists():
                 try:
-                    fp.write_bytes(render_frame(key, i, bool(fut), False, bool(reg)))
+                    fp.write_bytes(render_frame(key, i, bool(ov)))
                 except Exception as e:
                     print(f"[prerender] {key} f{i}: {e}", flush=True)
                     return
-        done += 1
         with _prerender_lock:
-            _prerender[key]["done"] = done
+            _prerender[key]["done"] = i + 1
 
 STORE_PLACEHOLDER = None
 
@@ -163,7 +160,15 @@ STORE_PLACEHOLDER = None
 # 帧渲染(服务端 cv2, 遵守渲染规矩)
 # ---------------------------------------------------------------------------
 
-def render_frame(key: str, i: int, show_future: bool, show_mask: bool, show_region: bool) -> bytes:
+def render_frame(key: str, i: int, overlay: bool) -> bytes:
+    """Render one review frame.
+
+    Tier A (overlay=False): video-style trajectory only — a single green->red
+    gradient polyline of the REMAINING path (current tip -> final tip, in the
+    current frame's reference), green dot at the tip, blue dot at the end.
+    Tier B (overlay=True): tier A + HSV red-mask tint + capsule region outline
+    + endpoint cross.
+    """
     t = STORE.trajectory(key)
     if t is None:
         raise FileNotFoundError(key)
@@ -173,49 +178,41 @@ def render_frame(key: str, i: int, show_future: bool, show_mask: bool, show_regi
     if img is None:
         raise FileNotFoundError(str(imgs[i]))
     vis = img.copy()
-    m = qc._red_mask_hsv(img) if (show_mask or show_region) else None
-    if show_mask and m is not None:
+    m = qc._red_mask_hsv(img) if overlay else None
+    if overlay and m is not None:
         ov = vis.copy()
         ov[m] = (255, 0, 255)
         vis = cv2.addWeighted(ov, 0.4, vis, 0.6, 0)
 
     p2, ok = t["p2f"][i], t["okf"][i]     # 第 i 帧参考系的投影
     n = len(p2)
-    # 过去轨迹: 绿->红渐变(时间越近越红)
-    for a in range(min(i, n - 1)):
+    last = max(k for k in range(n) if ok[k]) if ok.any() else i
+    # 剩余路径: 从当前帧到终点, 绿(现在)->红(终点) 单根渐变线(同视频)
+    for a in range(i, last):
         if not (ok[a] and ok[a + 1]):
             continue
-        f = a / max(1, i - 1) if i > 1 else 0
+        f = (a - i) / max(1, last - i)
         cv2.polylines(vis, [p2[a:a + 2].astype(np.int32).reshape(-1, 1, 2)], False,
                       (0, int(255 * (1 - f)), int(255 * f)), 3)
-    # 未来轨迹: 灰色细线
-    if show_future:
-        for a in range(i, n - 1):
-            if not (ok[a] and ok[a + 1]):
-                continue
-            cv2.polylines(vis, [p2[a:a + 2].astype(np.int32).reshape(-1, 1, 2)], False,
-                          (190, 190, 190), 2)
-    # 当前指尖: 固定在相机系里的那一点(应始终钉在画面中物理指尖上)
-    if 0 <= i < n and ok[i]:
-        cv2.circle(vis, (int(round(p2[i][0])), int(round(p2[i][1]))), 7, (0, 255, 0), -1)
-    # 终点十字 + 胶囊轮廓: 锚在"当前显示帧参考系"里的最后一帧指尖
-    if show_region and m is not None:
-        pe = t["p2f"][i][-1]
-        if np.isfinite(pe).all():
-            cv2.drawMarker(vis, (int(round(pe[0])), int(round(pe[1]))), (0, 0, 255),
-                           cv2.MARKER_CROSS, 20, 2)
+    # 当前指尖绿点(钉在物理指尖上) + 终点蓝点
+    if ok[i]:
+        cv2.circle(vis, (int(round(p2[i][0])), int(round(p2[i][1]))), 6, (0, 255, 0), -1)
+    if ok[last]:
+        cv2.circle(vis, (int(round(p2[last][0])), int(round(p2[last][1]))), 6, (255, 0, 0), -1)
+    # 档B: 胶囊检测区 + 终点红叉
+    if overlay and m is not None:
+        if ok[last]:
+            cv2.drawMarker(vis, (int(round(p2[last][0])), int(round(p2[last][1]))),
+                           (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
         rel = np.linalg.inv(t["poses"][i]) @ t["poses"]
-        fin_rows = np.isfinite(rel[:, :3, 3]).all(axis=1)
-        if fin_rows.any():
-            k = int(np.where(fin_rows)[0][-1])
-            end3 = (rel[k, :3, :3] @ t["tip"]) + rel[k, :3, 3]
-            end_opt = end3 @ t["T_oc"].T
-            if np.isfinite(end_opt).all():
-                geo = qc.capsule_geometry(end_opt, t["K"], t["D"])
-                region = qc.capsule_region_mask(m.shape, geo["discs"])
-                contours, _ = cv2.findContours(region.astype(np.uint8), cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(vis, contours, -1, (0, 255, 255), 1)
+        end3 = (rel[last, :3, :3] @ t["tip"]) + rel[last, :3, 3]
+        end_opt = end3 @ t["T_oc"].T
+        if np.isfinite(end_opt).all():
+            geo = qc.capsule_geometry(end_opt, t["K"], t["D"])
+            region = qc.capsule_region_mask(m.shape, geo["discs"])
+            contours, _ = cv2.findContours(region.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(vis, contours, -1, (0, 255, 255), 1)
     okk, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 88])
     return buf.tobytes()
 
@@ -297,9 +294,7 @@ textarea{width:100%;min-height:64px;background:var(--bg);color:var(--fg);border:
   <button onclick="step(1)">▶</button><span id="prog" class="kbd"></span>
   <input type="range" id="slider" min="0" value="0">
   <span id="frameNo">-</span>
-  <label class="tog"><input type="checkbox" id="tFut" checked>未来</label>
-  <label class="tog"><input type="checkbox" id="tMask">红掩膜</label>
-  <label class="tog"><input type="checkbox" id="tReg" checked>检测区</label>
+  <label class="tog"><input type="checkbox" id="tOv" checked>掩膜与检测框</label>
 </div>
 </body>
 <script>
@@ -324,8 +319,8 @@ function pollProg(){if(cur<0||!EPS[cur])return;const e=EPS[cur];
     if(p.total>0&&p.done<p.total){el.textContent=`渲染中 ${p.done}/${p.total}`;setTimeout(pollProg,700);}
     else el.textContent='';
   }).catch(()=>{});}
-function src(){const e=EPS[cur];const q=`?i=${i}&fut=${$('tFut').checked?1:0}&mask=${$('tMask').checked?1:0}&reg=${$('tReg').checked?1:0}`;
-  return '/frame/'+encodeURIComponent(e.key)+q;}
+function src(){const e=EPS[cur];
+  return '/frame/'+encodeURIComponent(e.key)+`?i=${i}&ov=${$('tOv').checked?1:0}`;}
 function show(){$('frame').src=src();$('slider').value=i;$('frameNo').textContent=`${i} / ${N-1}`;
   const cut=(QC.start_frame||0)>i;$('frame').classList.toggle('cut',cut);
   $('hud').textContent=`f${i}/${N-1}  ts=${(TR.times&&TR.times[i])??'-'}  grip=${(TR.grip&&TR.grip[i])??'-'}`;
@@ -413,7 +408,7 @@ document.addEventListener('keydown',e=>{if(e.target.tagName==='TEXTAREA'||e.targ
   else if(e.key==='PageUp'&&cur>0){cur--;renderList();loadEp();}else if(e.key==='PageDown'&&cur<EPS.length-1){cur++;renderList();loadEp();}
   else if(e.key==='s'||e.key==='S')save();});
 $('slider').oninput=e=>{i=parseInt(e.target.value);show();};
-['tFut','tMask','tReg'].forEach(id=>$(id).onchange=()=>show());
+$('tOv').onchange=()=>show();
 $('filter').onchange=()=>{cur=0;loadList();};
 $('play').onclick=play;
 const t2=document.createElement('div');t2.id='toast';document.body.appendChild(t2);
@@ -508,16 +503,11 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path.startswith("/frame/"):
                 key = unquote(u.path[len("/frame/"):])
                 i = int(q.get("i", ["0"])[0])
-                fut = q.get("fut", ["0"])[0] == "1"
-                mask = q.get("mask", ["0"])[0] == "1"
-                reg = q.get("reg", ["0"])[0] == "1"
-                b = None
-                if not mask:  # 4 组合预渲染缓存; 掩膜实时
-                    fp = _cache_dir(key) / f"f{i:05d}_f{int(fut)}r{int(reg)}.jpg"
-                    if fp.exists():
-                        b = fp.read_bytes()
+                ov = q.get("ov", ["1"])[0] == "1"
+                fp = _cache_dir(key) / f"f{i:05d}_o{int(ov)}.jpg"
+                b = fp.read_bytes() if fp.exists() else None
                 if b is None:
-                    b = render_frame(key, i, fut, mask, reg)
+                    b = render_frame(key, i, ov)
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Cache-Control", "no-store")
