@@ -142,44 +142,20 @@ def start_prerender(key: str):
 
 def _prerender_worker(key: str, total: int):
     d = _cache_dir(key)
+    combos = [(1, 1), (0, 1), (1, 0), (0, 0)]   # (fut, reg); mask 走实时
+    done = 0
     for i in range(total):
-        fp = d / f"f{i:05d}.jpg"
-        if not fp.exists():
-            try:
-                fp.write_bytes(render_frame(key, i, True, False, True))
-            except Exception as e:
-                print(f"[prerender] {key} f{i}: {e}", flush=True)
-                break
+        for fut, reg in combos:
+            fp = d / f"f{i:05d}_f{int(fut)}r{int(reg)}.jpg"
+            if not fp.exists():
+                try:
+                    fp.write_bytes(render_frame(key, i, bool(fut), False, bool(reg)))
+                except Exception as e:
+                    print(f"[prerender] {key} f{i}: {e}", flush=True)
+                    return
+        done += 1
         with _prerender_lock:
-            _prerender[key]["done"] = i + 1
-    # 3D 全程轨迹图(每集一张,静态)
-    p3d = d / "path3d.jpg"
-    if not p3d.exists():
-        try:
-            _render_3d(key, p3d)
-        except Exception as e:
-            print(f"[prerender3d] {key}: {e}", flush=True)
-
-
-def _render_3d(key: str, out: Path):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    t = STORE.trajectory(key)
-    pos = t["poses"][:, :3, 3]
-    fig = plt.figure(figsize=(4, 3.4), dpi=110)
-    ax = fig.add_subplot(111, projection="3d")
-    ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], lw=1.6, color="#4da3ff")
-    ax.scatter(*pos[0], color="#2e9e5b", s=28)
-    fin = np.isfinite(pos).all(axis=1)
-    if fin.any():
-        ax.scatter(*pos[fin][-1], color="#e05252", s=28)
-    ax.set_title("trajectory (camera_link)", fontsize=9)
-    ax.set_box_aspect((1, 1, 1))
-    fig.tight_layout()
-    fig.savefig(out)
-    plt.close(fig)
-
+            _prerender[key]["done"] = done
 
 STORE_PLACEHOLDER = None
 
@@ -370,7 +346,8 @@ function drawGrip(){const c=document.getElementById('gcurve');if(!c||!TR||!TR.gr
   ctx.strokeStyle='#4da3ff';ctx.lineWidth=2;ctx.beginPath();
   ctx.moveTo(i/(n-1)*W,0);ctx.lineTo(i/(n-1)*W,H);ctx.stroke();ctx.lineWidth=1;}
 function draw3d(){const c=document.getElementById('traj3d');if(!c||!TR||!TR.xyz)return;
-  const ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);
+  const ctx=c.getContext('2d'),W=c.width,H=c.height;
+  ctx.fillStyle='#fafafa';ctx.fillRect(0,0,W,H);
   const pts=TR.xyz,n=pts.length;if(!n)return;
   let lo=[1e9,1e9,1e9],hi=[-1e9,-1e9,-1e9];
   for(const p of pts)if(p)p.forEach((v,k)=>{lo[k]=Math.min(lo[k],v);hi[k]=Math.max(hi[k],v);});
@@ -378,14 +355,14 @@ function draw3d(){const c=document.getElementById('traj3d');if(!c||!TR||!TR.xyz)
   const pr=p=>{if(!p)return null;const x=(p[0]-lo[0])/((hi[0]-lo[0])||1)-.5,y=(p[1]-lo[1])/((hi[1]-lo[1])||1)-.5,z=(p[2]-lo[2])/((hi[2]-lo[2])||1)-.5;
     return [W/2+(x-y)*c30*W*0.35, H/2+(x+y)*s30*H*0.55-z*H*0.5];};
   // 全程淡线 + 渐进亮线
-  ctx.strokeStyle='#2c313a';ctx.beginPath();let m=0;
+  ctx.strokeStyle='#cfcfcf';ctx.beginPath();let m=0;
   for(const p of pts){const q=pr(p);if(!q){m=1;continue}m?ctx.moveTo(q[0],q[1]):ctx.lineTo(q[0],q[1]);m=0;}
   ctx.stroke();
-  ctx.strokeStyle='#4da3ff';ctx.lineWidth=2;ctx.beginPath();m=0;
+  ctx.strokeStyle='#1565c0';ctx.lineWidth=2;ctx.beginPath();m=0;
   for(let k=0;k<=i&&k<n;k++){const q=pr(pts[k]);if(!q){m=1;continue}m?ctx.moveTo(q[0],q[1]):ctx.lineTo(q[0],q[1]);m=0;}
   ctx.stroke();ctx.lineWidth=1;
-  const a=pr(pts.find(Boolean));if(a){ctx.fillStyle='#2e9e5b';ctx.beginPath();ctx.arc(a[0],a[1],4,0,7);ctx.fill();}
-  const cur=pr(pts[i]);if(cur){ctx.fillStyle='#4da3ff';ctx.beginPath();ctx.arc(cur[0],cur[1],4,0,7);ctx.fill();}
+  const a=pr(pts.find(Boolean));if(a){ctx.fillStyle='#1b7a3d';ctx.beginPath();ctx.arc(a[0],a[1],4,0,7);ctx.fill();}
+  const cur=pr(pts[i]);if(cur){ctx.fillStyle='#0d5bb5';ctx.beginPath();ctx.arc(cur[0],cur[1],4,0,7);ctx.fill();}
   for(let k=n-1;k>=0;k--){const q=pr(pts[k]);if(q){ctx.fillStyle='#e05252';ctx.beginPath();ctx.arc(q[0],q[1],4,0,7);ctx.fill();break;}}
 }
 document.addEventListener('click',e=>{const c=e.target.closest&&e.target.closest('#gcurve');
@@ -535,8 +512,8 @@ class Handler(BaseHTTPRequestHandler):
                 mask = q.get("mask", ["0"])[0] == "1"
                 reg = q.get("reg", ["0"])[0] == "1"
                 b = None
-                if not mask:  # 默认组合走预渲染缓存
-                    fp = _cache_dir(key) / f"f{i:05d}.jpg"
+                if not mask:  # 4 组合预渲染缓存; 掩膜实时
+                    fp = _cache_dir(key) / f"f{i:05d}_f{int(fut)}r{int(reg)}.jpg"
                     if fp.exists():
                         b = fp.read_bytes()
                 if b is None:
