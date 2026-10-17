@@ -45,7 +45,8 @@ class Store:
 
     def reload(self):
         eps = {}
-        for sess in sorted(self.root.glob("*-png")):
+        sessions = sorted(set(self.root.glob("*-png")) | set(self.root.glob("*/*-png")))
+        for sess in sessions:
             if not sess.is_dir():
                 continue
             for ep in sorted(sess.glob("episode_*")):
@@ -79,23 +80,108 @@ class Store:
         D = np.array(info["D"], float).ravel()
         T_oc = np.array(ext["T_optical_camera"], float)[:3, :3]
         tip = np.array(ext["T_camera_gripper_tip"], float)[:3, 3]
-        rel = np.linalg.inv(poses[0]) @ poses
-        pts = (rel[:, :3, :3] @ tip[:, None]).squeeze(2) + rel[:, :3, 3]
-        pts_opt = pts @ T_oc.T
-        p2, _ = cv2.projectPoints(pts_opt.astype(float), np.zeros(3), np.zeros(3), K, D)
-        p2 = p2.reshape(-1, 2)
-        z = pts_opt[:, 2]
-        ang = np.degrees(np.arctan2(np.linalg.norm(pts_opt[:, :2], axis=1), np.maximum(z, 1e-9)))
-        ok = (z >= 0.03) & (ang <= 45) & np.isfinite(p2).all(axis=1)
+        # 世界系(=首帧参考)下的指尖路径 + 末端点(胶囊几何用,不随显示帧变)
+        rel0 = np.linalg.inv(poses[0]) @ poses
+        pts_w = (rel0[:, :3, :3] @ tip[:, None]).squeeze(2) + rel0[:, :3, 3]
         times = np.atleast_1d(np.loadtxt(ep / "times.txt"))
+        # 每帧自己的参考系投影(用户 2026-10-17 修正: 画在第 i 帧上的路径必须
+        # 以第 i 帧为参考, 否则路径像刚体一样钉在相机上跟着走)
+        p2f = np.full((len(poses), len(poses), 2), np.nan)
+        okf = np.zeros((len(poses), len(poses)), dtype=bool)
+        for i in range(len(poses)):
+            if not np.isfinite(poses[i][:3, :3]).all():
+                continue
+            rel = np.linalg.inv(poses[i]) @ poses
+            pts = (rel[:, :3, :3] @ tip[:, None]).squeeze(2) + rel[:, :3, 3]
+            pts_opt = pts @ T_oc.T
+            if not np.isfinite(pts_opt).all():
+                fin = np.isfinite(pts_opt).all(axis=1)
+            else:
+                fin = np.ones(len(poses), dtype=bool)
+            pj, _ = cv2.projectPoints(pts_opt[fin].astype(float), np.zeros(3), np.zeros(3), K, D)
+            pj = pj.reshape(-1, 2)
+            z = pts_opt[fin][:, 2]
+            ang = np.degrees(np.arctan2(np.linalg.norm(pts_opt[fin][:, :2], axis=1), np.maximum(z, 1e-9)))
+            ok = (z >= 0.03) & (ang <= 45) & np.isfinite(pj).all(axis=1)
+            p2f[i][fin] = pj
+            okf[i][fin] = ok
         tdoc = {"poses": poses, "grip": grip, "times": times, "K": K, "D": D,
-                "p2": p2, "ok": ok, "pts_opt": pts_opt, "dir": ep}
+                "p2f": p2f, "okf": okf, "pts_w_last": pts_w[-1], "dir": ep,
+                "tip": tip, "T_oc": T_oc}
         with self.lock:
             self.traj[key] = tdoc
         return tdoc
 
 
 STORE: Store | None = None
+CACHE_DIR = Path("/tmp/qc_review_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_prerender: dict[str, dict] = {}   # key -> {"done": int, "total": int, "thread": T}
+_prerender_lock = threading.Lock()
+
+
+def _cache_dir(key: str) -> Path:
+    d = CACHE_DIR / key.replace("/", "__")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def start_prerender(key: str):
+    """Background-render every frame of an episode into the cache dir (default
+    overlay combo fut=1 reg=1 mask=0) so scrubbing/playback is instant."""
+    with _prerender_lock:
+        st = _prerender.get(key)
+        if st and st["thread"].is_alive():
+            return
+        t = STORE.trajectory(key)
+        total = len(t["poses"]) if t else 0
+        th = threading.Thread(target=_prerender_worker, args=(key, total), daemon=True)
+        _prerender[key] = {"done": 0, "total": total, "thread": th}
+        th.start()
+
+
+def _prerender_worker(key: str, total: int):
+    d = _cache_dir(key)
+    for i in range(total):
+        fp = d / f"f{i:05d}.jpg"
+        if not fp.exists():
+            try:
+                fp.write_bytes(render_frame(key, i, True, False, True))
+            except Exception as e:
+                print(f"[prerender] {key} f{i}: {e}", flush=True)
+                break
+        with _prerender_lock:
+            _prerender[key]["done"] = i + 1
+    # 3D 全程轨迹图(每集一张,静态)
+    p3d = d / "path3d.jpg"
+    if not p3d.exists():
+        try:
+            _render_3d(key, p3d)
+        except Exception as e:
+            print(f"[prerender3d] {key}: {e}", flush=True)
+
+
+def _render_3d(key: str, out: Path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    t = STORE.trajectory(key)
+    pos = t["poses"][:, :3, 3]
+    fig = plt.figure(figsize=(4, 3.4), dpi=110)
+    ax = fig.add_subplot(111, projection="3d")
+    ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], lw=1.6, color="#4da3ff")
+    ax.scatter(*pos[0], color="#2e9e5b", s=28)
+    fin = np.isfinite(pos).all(axis=1)
+    if fin.any():
+        ax.scatter(*pos[fin][-1], color="#e05252", s=28)
+    ax.set_title("trajectory (camera_link)", fontsize=9)
+    ax.set_box_aspect((1, 1, 1))
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+STORE_PLACEHOLDER = None
 
 # ---------------------------------------------------------------------------
 # 帧渲染(服务端 cv2, 遵守渲染规矩)
@@ -117,13 +203,13 @@ def render_frame(key: str, i: int, show_future: bool, show_mask: bool, show_regi
         ov[m] = (255, 0, 255)
         vis = cv2.addWeighted(ov, 0.4, vis, 0.6, 0)
 
-    p2, ok = t["p2"], t["ok"]
+    p2, ok = t["p2f"][i], t["okf"][i]     # 第 i 帧参考系的投影
     n = len(p2)
-    # 过去轨迹: 绿->红渐变, 粗线
+    # 过去轨迹: 绿->红渐变(时间越近越红)
     for a in range(min(i, n - 1)):
         if not (ok[a] and ok[a + 1]):
             continue
-        f = a / max(1, n - 2)
+        f = a / max(1, i - 1) if i > 1 else 0
         cv2.polylines(vis, [p2[a:a + 2].astype(np.int32).reshape(-1, 1, 2)], False,
                       (0, int(255 * (1 - f)), int(255 * f)), 3)
     # 未来轨迹: 灰色细线
@@ -133,22 +219,27 @@ def render_frame(key: str, i: int, show_future: bool, show_mask: bool, show_regi
                 continue
             cv2.polylines(vis, [p2[a:a + 2].astype(np.int32).reshape(-1, 1, 2)], False,
                           (190, 190, 190), 2)
-    # 当前点
+    # 当前指尖: 固定在相机系里的那一点(应始终钉在画面中物理指尖上)
     if 0 <= i < n and ok[i]:
-        cv2.circle(vis, (int(round(p2[i][0])), int(round(p2[i][1]))), 6, (0, 255, 0), -1)
-    # 终点十字 + 胶囊轮廓(合并,细线)
+        cv2.circle(vis, (int(round(p2[i][0])), int(round(p2[i][1]))), 7, (0, 255, 0), -1)
+    # 终点十字 + 胶囊轮廓: 锚在"当前显示帧参考系"里的最后一帧指尖
     if show_region and m is not None:
-        valid = t["pts_opt"][np.isfinite(t["pts_opt"]).all(axis=1)]
-        if len(valid):
-            geo = qc.capsule_geometry(valid[-1], t["K"], t["D"])
-            region = qc.capsule_region_mask(m.shape, geo["discs"])
-            contours, _ = cv2.findContours(region.astype(np.uint8), cv2.RETR_EXTERNAL,
-                                           cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(vis, contours, -1, (0, 255, 255), 1)
-        if ok.any():
-            ex, ey = p2[ok][-1]
-            cv2.drawMarker(vis, (int(round(ex)), int(round(ey))), (0, 0, 255),
+        pe = t["p2f"][i][-1]
+        if np.isfinite(pe).all():
+            cv2.drawMarker(vis, (int(round(pe[0])), int(round(pe[1]))), (0, 0, 255),
                            cv2.MARKER_CROSS, 20, 2)
+        rel = np.linalg.inv(t["poses"][i]) @ t["poses"]
+        fin_rows = np.isfinite(rel[:, :3, 3]).all(axis=1)
+        if fin_rows.any():
+            k = int(np.where(fin_rows)[0][-1])
+            end3 = (rel[k, :3, :3] @ t["tip"]) + rel[k, :3, 3]
+            end_opt = end3 @ t["T_oc"].T
+            if np.isfinite(end_opt).all():
+                geo = qc.capsule_geometry(end_opt, t["K"], t["D"])
+                region = qc.capsule_region_mask(m.shape, geo["discs"])
+                contours, _ = cv2.findContours(region.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                               cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(vis, contours, -1, (0, 255, 255), 1)
     okk, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 88])
     return buf.tobytes()
 
@@ -226,8 +317,8 @@ textarea{width:100%;min-height:64px;background:var(--bg);color:var(--fg);border:
   <div id="side"></div>
 </div>
 <div id="bar">
-  <button id="play">▶</button><button onclick="step(-10)">⏮10</button><button onclick="step(-1)">◀</button>
-  <button onclick="step(1)">▶</button><button onclick="step(10)">10⏭</button>
+  <button id="play">▶</button><button onclick="step(-1)">◀</button>
+  <button onclick="step(1)">▶</button><span id="prog" class="kbd"></span>
   <input type="range" id="slider" min="0" value="0">
   <span id="frameNo">-</span>
   <select id="speed"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>
@@ -249,14 +340,40 @@ function renderList(){const L=$('list');L.innerHTML='';EPS.forEach((e,k)=>{const
   d.onclick=()=>{cur=k;renderList();loadEp()};L.appendChild(d);});}
 async function loadEp(){const e=EPS[cur];if(!e)return;dirty=false;
   TR=await (await fetch('/api/traj/'+encodeURIComponent(e.key))).json();QC=await (await fetch('/api/qc/'+encodeURIComponent(e.key))).json();
-  N=TR.n;i=0;$('slider').max=N-1;$('slider').value=0;stop();show();renderSide();}
+  N=TR.n;i=0;$('slider').max=N-1;$('slider').value=0;stop();show();renderSide();
+  fetch('/api/open/'+encodeURIComponent(e.key));pollProg();}
+function pollProg(){if(cur<0||!EPS[cur])return;const e=EPS[cur];
+  fetch('/api/progress/'+encodeURIComponent(e.key)).then(r=>r.json()).then(p=>{
+    const el=$('prog');
+    if(!el)return;
+    if(p.total>0&&p.done<p.total){el.textContent=`渲染中 ${p.done}/${p.total}`;setTimeout(pollProg,700);}
+    else{el.textContent='';const img3=document.getElementById('path3d');
+      if(img3)img3.src='/path3d.jpg?key='+encodeURIComponent(e.key)+'&t='+Date.now();}
+  }).catch(()=>{});}
 function src(){const e=EPS[cur];const q=`?i=${i}&fut=${$('tFut').checked?1:0}&mask=${$('tMask').checked?1:0}&reg=${$('tReg').checked?1:0}`;
   return '/frame/'+encodeURIComponent(e.key)+q;}
 function show(){$('frame').src=src();$('slider').value=i;$('frameNo').textContent=`${i} / ${N-1}`;
   const cut=(QC.start_frame||0)>i;$('frame').classList.toggle('cut',cut);
   $('hud').textContent=`f${i}/${N-1}  ts=${(TR.times&&TR.times[i])??'-'}  grip=${(TR.grip&&TR.grip[i])??'-'}`;
   if(TR.poses&&TR.poses[i]){const p=TR.poses[i];const tb=document.getElementById('poseT');
-    if(tb){let h='';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<4;c++)h+=`<td>${p[r*4+c]}</td>`;h+='</tr>';}tb.innerHTML=h;}}}
+    if(tb){let h='';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<4;c++)h+=`<td>${p[r*4+c]}</td>`;h+='</tr>';}tb.innerHTML=h;}}
+  drawGrip();}
+function drawGrip(){const c=document.getElementById('gcurve');if(!c||!TR||!TR.grip)return;
+  const ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='#2c313a';ctx.strokeRect(0,0,W,H);
+  ctx.strokeStyle='#e65100';ctx.beginPath();
+  const g=TR.grip,n=g.length;
+  for(let k=0;k<n;k++){const x=k/(n-1)*W;const y=H-8-(g[k]??0)*(H-16);
+    if(g[k]==null){ctx.moveTo(x,y);continue}
+    k===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
+  ctx.stroke();
+  const sf=(QC&&QC.start_frame)||0;if(sf>0){ctx.strokeStyle='#d9a441';ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.moveTo(sf/(n-1)*W,0);ctx.lineTo(sf/(n-1)*W,H);ctx.stroke();ctx.setLineDash([]);}
+  ctx.strokeStyle='#4da3ff';ctx.lineWidth=2;ctx.beginPath();
+  ctx.moveTo(i/(n-1)*W,0);ctx.lineTo(i/(n-1)*W,H);ctx.stroke();ctx.lineWidth=1;}
+document.addEventListener('click',e=>{const c=e.target.closest&&e.target.closest('#gcurve');
+  if(c&&TR){const r=c.getBoundingClientRect();const f=Math.round((e.clientX-r.left)/r.width*(N-1));
+  i=Math.max(0,Math.min(N-1,f));show();}});
 function step(d){i=Math.max(0,Math.min(N-1,i+d));show();}
 function play(){playing=!playing;$('play').textContent=playing?'❚❚':'▶';
   if(playing){const iv=1000/30/parseFloat($('speed').value);timer=setInterval(()=>{if(i>=N-1){stop();return;}i++;show();},iv);}else clearInterval(timer);}
@@ -264,6 +381,8 @@ function stop(){playing=false;clearInterval(timer);$('play').textContent='▶';}
 function renderSide(){const e=EPS[cur];const fl=Object.entries(QC.flags||{}).filter(([k,v])=>v);
   const evi=QC.evidence||{};
   $('side').innerHTML=`
+  <div class="sec"><h3>轨迹 3D (camera_link)</h3><img id="path3d" style="width:100%;border-radius:5px" ${''}></div>
+  <div class="sec"><h3>夹爪曲线 (点击跳帧)</h3><canvas id="gcurve" width="290" height="90" style="width:100%;cursor:crosshair"></canvas></div>
   <div class="sec"><h3>当前帧位姿 (camera_link 3×4)</h3><table class="pose"><tbody id="poseT"></tbody></table></div>
   <div class="sec"><h3>FLAGS</h3><div class="flags">${fl.length?fl.map(([k])=>`<span class="chip" style="background:${FCOL[k]||'#333'}22;color:${FCOL[k]}">${k}</span>`).join(''):'<span style="color:var(--ok)">无</span>'}</div>
     <div class="evi" style="margin-top:8px">
@@ -292,7 +411,7 @@ function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');set
 async function reload(){await fetch('/api/reload');await loadList();toast('清单已刷新');}
 document.addEventListener('keydown',e=>{if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;
   if(e.code==='Space'){e.preventDefault();play();}
-  else if(e.key==='ArrowLeft')step(e.shiftKey?-10:-1);else if(e.key==='ArrowRight')step(e.shiftKey?10:1);
+  else if(e.key==='ArrowLeft')step(-1);else if(e.key==='ArrowRight')step(1);
   else if(e.key==='PageUp'&&cur>0){cur--;renderList();loadEp();}else if(e.key==='PageDown'&&cur<EPS.length-1){cur++;renderList();loadEp();}
   else if(e.key==='s'||e.key==='S')save();});
 $('slider').oninput=e=>{i=parseInt(e.target.value);show();};
@@ -366,11 +485,39 @@ class Handler(BaseHTTPRequestHandler):
                     "poses": [[round(float(v), 6) if np.isfinite(v) else None
                                for v in p[:3].reshape(-1)] for p in poses],
                 })
+            elif u.path.startswith("/api/open/"):
+                key = unquote(u.path[len("/api/open/"):])
+                start_prerender(key)
+                self._json({"ok": True})
+            elif u.path.startswith("/api/progress/"):
+                key = unquote(u.path[len("/api/progress/"):])
+                with _prerender_lock:
+                    st = _prerender.get(key, {"done": 0, "total": 0})
+                self._json({"done": st["done"], "total": st["total"]})
+            elif u.path == "/path3d.jpg":
+                key = unquote(q.get("key", [""])[0])
+                fp = _cache_dir(key) / "path3d.jpg"
+                if fp.exists():
+                    b = fp.read_bytes()
+                    self.send_response(200); self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Cache-Control", "max-age=3600")
+                    self.send_header("Content-Length", str(len(b))); self.end_headers()
+                    self.wfile.write(b)
+                else:
+                    self.send_error(404)
             elif u.path.startswith("/frame/"):
                 key = unquote(u.path[len("/frame/"):])
                 i = int(q.get("i", ["0"])[0])
-                b = render_frame(key, i, q.get("fut", ["0"])[0] == "1",
-                                 q.get("mask", ["0"])[0] == "1", q.get("reg", ["0"])[0] == "1")
+                fut = q.get("fut", ["0"])[0] == "1"
+                mask = q.get("mask", ["0"])[0] == "1"
+                reg = q.get("reg", ["0"])[0] == "1"
+                b = None
+                if not mask:  # 默认组合走预渲染缓存
+                    fp = _cache_dir(key) / f"f{i:05d}.jpg"
+                    if fp.exists():
+                        b = fp.read_bytes()
+                if b is None:
+                    b = render_frame(key, i, fut, mask, reg)
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Cache-Control", "no-store")
@@ -381,7 +528,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except Exception as e:
             import traceback
-            traceback.print_exc(flush=True)
+            traceback.print_exc()
             self._json({"error": str(e)}, 500)
 
     def do_POST(self):
