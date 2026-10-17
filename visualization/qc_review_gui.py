@@ -321,7 +321,6 @@ textarea{width:100%;min-height:64px;background:var(--bg);color:var(--fg);border:
   <button onclick="step(1)">▶</button><span id="prog" class="kbd"></span>
   <input type="range" id="slider" min="0" value="0">
   <span id="frameNo">-</span>
-  <select id="speed"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>
   <label class="tog"><input type="checkbox" id="tFut" checked>未来</label>
   <label class="tog"><input type="checkbox" id="tMask">红掩膜</label>
   <label class="tog"><input type="checkbox" id="tReg" checked>检测区</label>
@@ -340,15 +339,14 @@ function renderList(){const L=$('list');L.innerHTML='';EPS.forEach((e,k)=>{const
   d.onclick=()=>{cur=k;renderList();loadEp()};L.appendChild(d);});}
 async function loadEp(){const e=EPS[cur];if(!e)return;dirty=false;
   TR=await (await fetch('/api/traj/'+encodeURIComponent(e.key))).json();QC=await (await fetch('/api/qc/'+encodeURIComponent(e.key))).json();
-  N=TR.n;i=0;$('slider').max=N-1;$('slider').value=0;stop();show();renderSide();
+  N=TR.n;i=0;$('slider').max=N-1;$('slider').value=0;stop();renderSide();show();
   fetch('/api/open/'+encodeURIComponent(e.key));pollProg();}
 function pollProg(){if(cur<0||!EPS[cur])return;const e=EPS[cur];
   fetch('/api/progress/'+encodeURIComponent(e.key)).then(r=>r.json()).then(p=>{
     const el=$('prog');
     if(!el)return;
     if(p.total>0&&p.done<p.total){el.textContent=`渲染中 ${p.done}/${p.total}`;setTimeout(pollProg,700);}
-    else{el.textContent='';const img3=document.getElementById('path3d');
-      if(img3)img3.src='/path3d.jpg?key='+encodeURIComponent(e.key)+'&t='+Date.now();}
+    else el.textContent='';
   }).catch(()=>{});}
 function src(){const e=EPS[cur];const q=`?i=${i}&fut=${$('tFut').checked?1:0}&mask=${$('tMask').checked?1:0}&reg=${$('tReg').checked?1:0}`;
   return '/frame/'+encodeURIComponent(e.key)+q;}
@@ -357,7 +355,7 @@ function show(){$('frame').src=src();$('slider').value=i;$('frameNo').textConten
   $('hud').textContent=`f${i}/${N-1}  ts=${(TR.times&&TR.times[i])??'-'}  grip=${(TR.grip&&TR.grip[i])??'-'}`;
   if(TR.poses&&TR.poses[i]){const p=TR.poses[i];const tb=document.getElementById('poseT');
     if(tb){let h='';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<4;c++)h+=`<td>${p[r*4+c]}</td>`;h+='</tr>';}tb.innerHTML=h;}}
-  drawGrip();}
+  drawGrip();draw3d();}
 function drawGrip(){const c=document.getElementById('gcurve');if(!c||!TR||!TR.grip)return;
   const ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);
   ctx.strokeStyle='#2c313a';ctx.strokeRect(0,0,W,H);
@@ -371,17 +369,36 @@ function drawGrip(){const c=document.getElementById('gcurve');if(!c||!TR||!TR.gr
     ctx.beginPath();ctx.moveTo(sf/(n-1)*W,0);ctx.lineTo(sf/(n-1)*W,H);ctx.stroke();ctx.setLineDash([]);}
   ctx.strokeStyle='#4da3ff';ctx.lineWidth=2;ctx.beginPath();
   ctx.moveTo(i/(n-1)*W,0);ctx.lineTo(i/(n-1)*W,H);ctx.stroke();ctx.lineWidth=1;}
+function draw3d(){const c=document.getElementById('traj3d');if(!c||!TR||!TR.xyz)return;
+  const ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);
+  const pts=TR.xyz,n=pts.length;if(!n)return;
+  let lo=[1e9,1e9,1e9],hi=[-1e9,-1e9,-1e9];
+  for(const p of pts)if(p)p.forEach((v,k)=>{lo[k]=Math.min(lo[k],v);hi[k]=Math.max(hi[k],v);});
+  const c30=Math.cos(Math.PI/6),s30=Math.sin(Math.PI/6);
+  const pr=p=>{if(!p)return null;const x=(p[0]-lo[0])/((hi[0]-lo[0])||1)-.5,y=(p[1]-lo[1])/((hi[1]-lo[1])||1)-.5,z=(p[2]-lo[2])/((hi[2]-lo[2])||1)-.5;
+    return [W/2+(x-y)*c30*W*0.35, H/2+(x+y)*s30*H*0.55-z*H*0.5];};
+  // 全程淡线 + 渐进亮线
+  ctx.strokeStyle='#2c313a';ctx.beginPath();let m=0;
+  for(const p of pts){const q=pr(p);if(!q){m=1;continue}m?ctx.moveTo(q[0],q[1]):ctx.lineTo(q[0],q[1]);m=0;}
+  ctx.stroke();
+  ctx.strokeStyle='#4da3ff';ctx.lineWidth=2;ctx.beginPath();m=0;
+  for(let k=0;k<=i&&k<n;k++){const q=pr(pts[k]);if(!q){m=1;continue}m?ctx.moveTo(q[0],q[1]):ctx.lineTo(q[0],q[1]);m=0;}
+  ctx.stroke();ctx.lineWidth=1;
+  const a=pr(pts.find(Boolean));if(a){ctx.fillStyle='#2e9e5b';ctx.beginPath();ctx.arc(a[0],a[1],4,0,7);ctx.fill();}
+  const cur=pr(pts[i]);if(cur){ctx.fillStyle='#4da3ff';ctx.beginPath();ctx.arc(cur[0],cur[1],4,0,7);ctx.fill();}
+  for(let k=n-1;k>=0;k--){const q=pr(pts[k]);if(q){ctx.fillStyle='#e05252';ctx.beginPath();ctx.arc(q[0],q[1],4,0,7);ctx.fill();break;}}
+}
 document.addEventListener('click',e=>{const c=e.target.closest&&e.target.closest('#gcurve');
   if(c&&TR){const r=c.getBoundingClientRect();const f=Math.round((e.clientX-r.left)/r.width*(N-1));
   i=Math.max(0,Math.min(N-1,f));show();}});
 function step(d){i=Math.max(0,Math.min(N-1,i+d));show();}
-function play(){playing=!playing;$('play').textContent=playing?'❚❚':'▶';
-  if(playing){const iv=1000/30/parseFloat($('speed').value);timer=setInterval(()=>{if(i>=N-1){stop();return;}i++;show();},iv);}else clearInterval(timer);}
+function play(){if(!playing&&i>=N-1)i=0;playing=!playing;$('play').textContent=playing?'❚❚':'▶';
+  if(playing){timer=setInterval(()=>{if(i>=N-1){stop();return;}i++;show();},1000/30);}else clearInterval(timer);}
 function stop(){playing=false;clearInterval(timer);$('play').textContent='▶';}
 function renderSide(){const e=EPS[cur];const fl=Object.entries(QC.flags||{}).filter(([k,v])=>v);
   const evi=QC.evidence||{};
   $('side').innerHTML=`
-  <div class="sec"><h3>轨迹 3D (camera_link)</h3><img id="path3d" style="width:100%;border-radius:5px" ${''}></div>
+  <div class="sec"><h3>轨迹 3D (camera_link, 随帧渐进)</h3><canvas id="traj3d" width="290" height="200" style="width:100%"></canvas></div>
   <div class="sec"><h3>夹爪曲线 (点击跳帧)</h3><canvas id="gcurve" width="290" height="90" style="width:100%;cursor:crosshair"></canvas></div>
   <div class="sec"><h3>当前帧位姿 (camera_link 3×4)</h3><table class="pose"><tbody id="poseT"></tbody></table></div>
   <div class="sec"><h3>FLAGS</h3><div class="flags">${fl.length?fl.map(([k])=>`<span class="chip" style="background:${FCOL[k]||'#333'}22;color:${FCOL[k]}">${k}</span>`).join(''):'<span style="color:var(--ok)">无</span>'}</div>
@@ -397,11 +414,15 @@ function renderSide(){const e=EPS[cur];const fl=Object.entries(QC.flags||{}).fil
       <button class="vbtn bad ${QC.verdict==='rejected'?'on':''}" onclick="setV('rejected')">✕ 拒绝</button>
       <button class="vbtn pend ${QC.verdict==='pending'?'on':''}" onclick="setV('pending')">撤回待审</button>
     </div>
-    <div class="sfrow"><input id="sf" type="number" min="0" max="${N-1}" value="${QC.start_frame||0}">
-      <button onclick="$('sf').value=i;dirty=true">设为当前帧</button></div>
+    <div class="sfrow"><input id="sf" type="number" min="0" max="${N-1}" value="${QC.start_frame||0}" title="起始帧">
+      <button onclick="$('sf').value=i;dirty=true" title="把起始帧设为当前显示的帧">设为当前帧</button>
+      <span title="选择该 episode 进入数据集的起始帧。起始帧之前通常是: 初始化缺帧(NaN)或画面中尚未出现草莓的帧——这些帧没有训练价值,人工选定从此帧开始。" style="cursor:help;color:var(--dim);border:1px solid var(--line);border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;font-size:11px">?</span></div>
     <textarea id="note" placeholder="人工备注…">${QC.review_note||''}</textarea>
     <button id="save" onclick="save()">保存 (S)</button></div>`;}
-function setV(v){QC.verdict=v;dirty=true;renderSide();}
+function setV(v){QC.verdict=v;dirty=true;
+  document.querySelectorAll('.vbtn').forEach(b=>b.classList.remove('on'));
+  const map={manual_ok:0,rejected:1,pending:2};const bs=document.querySelectorAll('.vbtn');
+  if(bs[map[v]])bs[map[v]].classList.add('on');}
 async function save(){const e=EPS[cur];
   const body={verdict:QC.verdict,start_frame:parseInt($('sf').value||0),review_note:$('note').value};
   const r=await (await fetch('/api/qc/'+encodeURIComponent(e.key),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
@@ -484,6 +505,8 @@ class Handler(BaseHTTPRequestHandler):
                     "grip": [round(float(x), 3) if np.isfinite(x) else None for x in t["grip"]],
                     "poses": [[round(float(v), 6) if np.isfinite(v) else None
                                for v in p[:3].reshape(-1)] for p in poses],
+                    "xyz": [[round(float(v), 4) if np.isfinite(v) else None
+                             for v in p[:3, 3]] for p in poses],
                 })
             elif u.path.startswith("/api/open/"):
                 key = unquote(u.path[len("/api/open/"):])
