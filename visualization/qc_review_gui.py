@@ -343,9 +343,10 @@ function draw3d(){const c=document.getElementById('traj3d');if(!c||!TR||!TR.xyz)
   const pts=TR.xyz,n=pts.length;if(!n)return;
   let lo=[1e9,1e9,1e9],hi=[-1e9,-1e9,-1e9];
   for(const p of pts)if(p)p.forEach((v,k)=>{lo[k]=Math.min(lo[k],v);hi[k]=Math.max(hi[k],v);});
-  // 俯视(用户指定朝向): X→屏幕上方, Y→屏幕左侧; 统一米/像素(两轴同尺度,
-  // 以画布能容纳的最大跨度为准——X远大于Y时如实显示为细长轨迹,不再各自归一)
-  const pr=(()=>{const sp=Math.max(hi[0]-lo[0],hi[1]-lo[1])||1e-6;
+  // 俯视(用户指定朝向): X→屏幕上方, Y→屏幕左侧; 统一米/像素。
+  // 基准: 20cm 跨度占满画布——小轨迹按小如实显示(不放大防误判),
+  // X或Y超出20cm时才放大画布适配(用户 2026-10-17 定的显示策略)。
+  const pr=(()=>{const sp=Math.max(0.20,hi[0]-lo[0],hi[1]-lo[1])||1e-6;
     const cx=(lo[0]+hi[0])/2, cy=(lo[1]+hi[1])/2, k=Math.min(W,H)*0.8/sp;
     return p=>{if(!p)return null;
       return [W/2-(p[1]-cy)*k, H/2-(p[0]-cx)*k]};})();
