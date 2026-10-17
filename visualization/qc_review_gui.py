@@ -166,8 +166,7 @@ def render_frame(key: str, i: int, overlay: bool) -> bytes:
     Tier A (overlay=False): video-style trajectory only — a single green->red
     gradient polyline of the REMAINING path (current tip -> final tip, in the
     current frame's reference), green dot at the tip, blue dot at the end.
-    Tier B (overlay=True): tier A + HSV red-mask tint + capsule region outline
-    + endpoint cross.
+    Tier B (overlay=True): tier A + HSV red-mask tint + capsule region outline.
     """
     t = STORE.trajectory(key)
     if t is None:
@@ -199,11 +198,8 @@ def render_frame(key: str, i: int, overlay: bool) -> bytes:
         cv2.circle(vis, (int(round(p2[i][0])), int(round(p2[i][1]))), 6, (0, 255, 0), -1)
     if ok[last]:
         cv2.circle(vis, (int(round(p2[last][0])), int(round(p2[last][1]))), 6, (255, 0, 0), -1)
-    # 档B: 胶囊检测区 + 终点红叉
+    # 档B: 胶囊检测区(终点已有蓝点,红叉冗余删去)
     if overlay and m is not None:
-        if ok[last]:
-            cv2.drawMarker(vis, (int(round(p2[last][0])), int(round(p2[last][1]))),
-                           (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
         rel = np.linalg.inv(t["poses"][i]) @ t["poses"]
         end3 = (rel[last, :3, :3] @ t["tip"]) + rel[last, :3, 3]
         end_opt = end3 @ t["T_oc"].T
