@@ -277,6 +277,7 @@ textarea{width:100%;min-height:64px;background:var(--bg);color:var(--fg);border:
   <h1>QC 复核台</h1><span class="dim" id="root"></span>
   <select id="filter"><option value="pending">待人工 (pending)</option><option value="all">全部</option>
   <option value="flagged">有任何flag</option><option value="manual">人工判过的</option></select>
+  <select id="sess"><option value="all">全部 session</option></select>
   <span class="dim" id="count"></span><button onclick="reload()">刷新清单</button>
   <span class="kbd">空格播放 · ←/→步进 · Shift跳10 · PgUp/PgDn换集 · S保存</span>
 </header>
@@ -297,7 +298,15 @@ textarea{width:100%;min-height:64px;background:var(--bg);color:var(--fg);border:
 let EPS=[],cur=-1,N=0,i=0,playing=false,timer=null,TR=null,QC=null,dirty=false;
 const $=id=>document.getElementById(id);
 const FCOL={not_processed:'#8b93a0',traj_missing:'#c62828',gripper_missing:'#ad1457',traj_frame_jump:'#ef6c00',first_frame_projection:'#6a1b9a',gripper_not_closed:'#00838f'};
-async function loadList(){EPS=await (await fetch('/api/episodes?filter='+$('filter').value)).json();$('count').textContent=EPS.length+' 集';
+let EPSALL=[],SESS='all';
+async function loadList(){EPSALL=await (await fetch('/api/episodes?filter='+$('filter').value)).json();
+  const sesss=[...new Set(EPSALL.map(e=>e.key.split('/')[0]))].sort();
+  const sel=$('sess'),old=sel.value;
+  sel.innerHTML='<option value="all">全部 session</option>'+sesss.map(x=>`<option>${x}</option>`).join('');
+  if(sesss.includes(old))sel.value=old;else SESS=sel.value='all';
+  applySession();}
+function applySession(){EPS=SESS==='all'?EPSALL:EPSALL.filter(e=>e.key.split('/')[0]===SESS);
+  $('count').textContent=EPS.length+' 集';
   if(cur>=EPS.length)cur=-1; renderList(); if(cur<0&&EPS.length){cur=0;loadEp();}}
 function renderList(){const L=$('list');L.innerHTML='';EPS.forEach((e,k)=>{const d=document.createElement('div');
   d.className='ep'+(k===cur?' on':'');const fl=Object.entries(e.flags||{}).filter(([k,v])=>v).map(([k])=>`<span class="fdot" title="${k}" style="background:${FCOL[k]||'#888'}"></span>`).join('');
@@ -411,6 +420,7 @@ document.addEventListener('keydown',e=>{if(e.target.tagName==='TEXTAREA'||e.targ
 $('slider').oninput=e=>{i=parseInt(e.target.value);show();};
 $('tOv').onchange=()=>show();
 $('filter').onchange=()=>{cur=0;loadList();};
+$('sess').onchange=()=>{SESS=$('sess').value;cur=0;applySession();};
 $('play').onclick=play;
 const t2=document.createElement('div');t2.id='toast';document.body.appendChild(t2);
 window.onerror=(m,src,l,c)=>{const b=document.createElement('div');
