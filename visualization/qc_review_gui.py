@@ -343,9 +343,12 @@ function draw3d(){const c=document.getElementById('traj3d');if(!c||!TR||!TR.xyz)
   const pts=TR.xyz,n=pts.length;if(!n)return;
   let lo=[1e9,1e9,1e9],hi=[-1e9,-1e9,-1e9];
   for(const p of pts)if(p)p.forEach((v,k)=>{lo[k]=Math.min(lo[k],v);hi[k]=Math.max(hi[k],v);});
-  // 俯视: 从 +Z 向下看 XY 平面 (X→屏幕右, Y→屏幕上)
-  const pr=p=>{if(!p)return null;const x=(p[0]-lo[0])/((hi[0]-lo[0])||1)-.5,y=(p[1]-lo[1])/((hi[1]-lo[1])||1)-.5;
-    return [W/2+x*W*0.8, H/2-y*H*0.8];};
+  // 俯视(用户指定朝向): X→屏幕上方, Y→屏幕左侧; 统一米/像素(两轴同尺度,
+  // 以画布能容纳的最大跨度为准——X远大于Y时如实显示为细长轨迹,不再各自归一)
+  const pr=(()=>{const sp=Math.max(hi[0]-lo[0],hi[1]-lo[1])||1e-6;
+    const cx=(lo[0]+hi[0])/2, cy=(lo[1]+hi[1])/2, k=Math.min(W,H)*0.8/sp;
+    return p=>{if(!p)return null;
+      return [W/2-(p[1]-cy)*k, H/2-(p[0]-cx)*k]};})();
   // 全程淡线 + 渐进亮线
   ctx.strokeStyle='#cfcfcf';ctx.beginPath();let m=0;
   for(const p of pts){const q=pr(p);if(!q){m=1;continue}m?ctx.moveTo(q[0],q[1]):ctx.lineTo(q[0],q[1]);m=0;}
@@ -367,7 +370,7 @@ function stop(){playing=false;clearInterval(timer);$('play').textContent='▶';}
 function renderSide(){const e=EPS[cur];const fl=Object.entries(QC.flags||{}).filter(([k,v])=>v);
   const evi=QC.evidence||{};
   $('side').innerHTML=`
-  <div class="sec"><h3>轨迹俯视 XY (camera_link, Z 向下看)</h3><canvas id="traj3d" width="290" height="200" style="width:100%"></canvas></div>
+  <div class="sec"><h3>轨迹俯视 (X↑ 前, Y← 左, Z 压掉)</h3><canvas id="traj3d" width="290" height="200" style="width:100%"></canvas></div>
   <div class="sec"><h3>夹爪曲线 <span id="gval" style="float:right;font-family:var(--mono);color:var(--acc)"></span></h3><canvas id="gcurve" width="290" height="90" style="width:100%;cursor:crosshair"></canvas></div>
   <div class="sec"><h3>当前帧位姿 (camera_link 3×4)</h3><table class="pose"><tbody id="poseT"></tbody></table></div>
   <div class="sec"><h3>FLAGS</h3><div class="flags">${fl.length?fl.map(([k])=>`<span class="chip" style="background:${FCOL[k]||'#333'}22;color:${FCOL[k]}">${k}</span>`).join(''):'<span style="color:var(--ok)">无</span>'}</div>
