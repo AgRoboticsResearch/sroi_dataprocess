@@ -384,21 +384,6 @@ def create_lerobot_dataset(
             "shape": (h, w, 3),
             "names": ["height", "width", "channels"],
         },
-        # Current-frame EE pose; RelativeEEDataset reads this as T_current when
-        # computing relative actions (T_rel = T_current^-1 @ T_future).
-        "observation.ee": {
-            "dtype": "float32",
-            "names": [
-                "ee.x",
-                "ee.y",
-                "ee.z",
-                "ee.wx",
-                "ee.wy",
-                "ee.wz",
-                "ee.gripper_pos",
-            ],
-            "shape": (7,),
-        },
         "action": {
             "dtype": "float32",
             "names": [
@@ -558,17 +543,6 @@ def create_lerobot_dataset(
         for i in range(min_length):
             image = images[i]
 
-            # Current-frame EE pose (T_current for RelativeEEDataset).
-            observation_ee = np.array([
-                positions[i, 0],  # x
-                positions[i, 1],  # y
-                positions[i, 2],  # z
-                rotvecs[i, 0],    # wx
-                rotvecs[i, 1],    # wy
-                rotvecs[i, 2],    # wz
-                gripper_distances[i],  # gripper_pos
-            ], dtype=np.float32)
-
             # Action (next state)
             # For the last frame, we repeat the last state
             next_idx = min(i + 1, min_length - 1)
@@ -585,7 +559,6 @@ def create_lerobot_dataset(
             # Build frame
             frame = {
                 "observation.images.camera": image,
-                "observation.ee": observation_ee,
                 "action": action,
                 "task": single_task,
             }
