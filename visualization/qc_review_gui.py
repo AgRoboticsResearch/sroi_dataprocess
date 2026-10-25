@@ -204,7 +204,12 @@ def render_frame(key: str, i: int, overlay: bool) -> bytes:
         end3 = (rel[last, :3, :3] @ t["tip"]) + rel[last, :3, 3]
         end_opt = end3 @ t["T_oc"].T
         if np.isfinite(end_opt).all():
-            geo = qc.capsule_geometry(end_opt, t["K"], t["D"])
+            # 重力在第 0 帧光学系定死一次,随当前帧姿态旋到本帧光学系(共轭):
+            #   R(i←0)^opt = R_oc · R(i←0)^link · R_oc^T
+            # 旧写法直接用 (0,cosP,sinP),等价于假设本帧姿态=首帧,俯角变化时
+            # 画出的胶囊会跟着相机转;修正后区域在世界系始终竖直下垂。
+            R0i_opt = t["T_oc"] @ rel[0, :3, :3] @ t["T_oc"].T
+            geo = qc.capsule_geometry(end_opt, t["K"], t["D"], R0i_opt=R0i_opt)
             region = qc.capsule_region_mask(m.shape, geo["discs"])
             contours, _ = cv2.findContours(region.astype(np.uint8), cv2.RETR_EXTERNAL,
                                            cv2.CHAIN_APPROX_SIMPLE)
@@ -562,7 +567,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global STORE
     ap = argparse.ArgumentParser(description="QC 人工复核图形界面")
-    ap.add_argument("--root", default="/home/ss/data/1000_onesb_labpicking")
+    ap.add_argument("--root", default="/home/ss/data/one_strawberry_labpicking")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
     STORE = Store(Path(args.root))

@@ -378,17 +378,23 @@ def _circle_count(mask: np.ndarray, cx: int, cy: int, rad: int) -> int:
     return int((mask & ((xx - cx) ** 2 + (yy - cy) ** 2 <= rad * rad)).sum())
 
 
-def capsule_geometry(p_end_opt: np.ndarray, K: np.ndarray, D: np.ndarray) -> dict:
+def capsule_geometry(p_end_opt: np.ndarray, K: np.ndarray, D: np.ndarray,
+                     R0i_opt: np.ndarray = np.eye(3)) -> dict:
     """Capsule detection region for one trajectory endpoint.
 
     Returns dict with:
       discs: [(cx, cy, r_px), ...] — sampled sphere discs of the projected
              capsule (union = detection region; centers NOT clipped to image)
       z_top: depth of the capsule-top sphere center (closest, for threshold)
-    Assumes no roll; world-down in the optical frame = (0, cosP, sinP).
+    Assumes no roll; gravity is fixed ONCE in the first-frame optical frame
+    as (0, cosP, sinP) and is world-vertical thereafter. R0i_opt rotates
+    first-frame optical coords into the frame p_end_opt lives in: identity
+    for the qc.py verdict (projects onto the first frame), the camera's
+    frame-to-frame rotation for the review GUI's per-frame overlay, so the
+    capsule stays world-vertical as the camera pitches.
     """
-    pitch = np.radians(CAMERA_PITCH_DEG)
-    g = np.array([0.0, np.cos(pitch), np.sin(pitch)])
+    g = R0i_opt @ np.array([0.0, np.cos(np.radians(CAMERA_PITCH_DEG)),
+                            np.sin(np.radians(CAMERA_PITCH_DEG))])
     r_m = REGION_RADIUS_M
     top_off = PICK_ABOVE_CALYX_MIN_M + r_m      # endpoint → capsule-top center
     bot_off = PICK_ABOVE_CALYX_MAX_M + r_m      # endpoint → capsule-bottom center
