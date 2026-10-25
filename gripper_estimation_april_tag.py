@@ -77,6 +77,7 @@ from gripper_tag_core import (
     DEFAULT_PREPROCESS_CHAIN,
     DEFAULT_PRIOR_CENTER_PX,
     DEFAULT_PRIOR_CENTER_TOL_PX,
+    DECODING_HAMMING_MAX,
     DEFAULT_SPIKE_THRESHOLD,
     DEFAULT_SYMMETRY_TOL_PX,
     DEFAULT_TAG_DISTANCE_BOUNDS,
@@ -570,7 +571,7 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
         preprocess_chain=list(preprocess_chain),
         symmetry_enabled=use_symmetry,
         symmetry_tol_px=symmetry_tol,
-        spike_threshold=spike_threshold,
+        hamming_max=DECODING_HAMMING_MAX,
     )
 
     if dist_plot_path is not None:
@@ -617,7 +618,6 @@ def process_episodes(data_folders, config_path, verbose=False, dist_plot_path=No
                   "QC will flag it (gripper_missing).")
             n_zero += 1
             continue
-        stats["interp_mode"] = interp_mode
         normalize_and_save(folder if folder.endswith('/') else folder + '/',
                            raw, min_distance, max_distance, normalization_manifest,
                            detection_stats=stats)

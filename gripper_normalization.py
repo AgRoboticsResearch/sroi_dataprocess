@@ -27,7 +27,7 @@ def build_manifest(
     preprocess_chain: list[str] | None = None,
     symmetry_enabled: bool = True,
     symmetry_tol_px: float | None = None,
-    spike_threshold: float | None = None,
+    hamming_max: int = 0,
 ) -> dict[str, Any]:
     """Build the normalization provenance shared by a processing run."""
     min_distance = float(min_distance)
@@ -65,11 +65,10 @@ def build_manifest(
                if symmetry_tol_px is not None else {}),
         },
     }
-    if spike_threshold is not None:
-        processing["spike_removal"] = {
-            "threshold_of_range": float(spike_threshold),
-            "flat_context": "both_sides",
-        }
+    # v3 decoding quality gate (spike-removal retired 2026-10-24, see
+    # experiments/spike_origin/ in the repo): error-corrected decodes are
+    # rejected at detection time.
+    processing["decoding_quality_gate"] = {"hamming_max": int(hamming_max)}
 
     return {
         "schema_version": 2,

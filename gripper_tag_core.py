@@ -17,17 +17,23 @@ entry points share one implementation of:
       they are exactly the single-frame misfits that used to become spikes)
     - one tag detected    -> distance = 2*|x_tag - cx| (recovers frames
       where the other tag is occluded or unreadable)
-  * flat-context spike removal (rare 1-2 frame misdetections): a run of at
+  * flat-context spike removal (RETIRED 2026-10-23 — misdetections are now
+    structurally excluded upstream; see experiments/spike_origin/): a run of at
     most 2 consecutive valid samples is a spike only when the surrounding
     valid samples on BOTH sides are each internally consistent, agree with
     each other (flat), and the run deviates from both by more than the
     threshold. Real fast motion fails the flat-context test and survives.
+  * decoding quality gate (v3): window-strip candidates must decode with
+    zero error correction (``hamming <= DECODING_HAMMING_MAX``). Glare and
+    jaw-highlight misdetections are error-corrected guesses; full-corpus
+    validation and the spike post-mortem live in experiments/spike_origin/.
   * gap filling by linear interpolation (interior) with nearest-value
     edges, replacing the old forward-fill that produced staircases during
     motion-blur dropouts.
 
-cx is estimated per episode as the median midpoint of both-tag frames,
-falling back to the run-level median and finally the image center.
+cx is estimated per session as the median midpoint of both-tag frames
+(falling back to the per-episode median and finally the image center),
+and the per-episode stats record the center actually used.
 """
 
 from __future__ import annotations
@@ -54,6 +60,19 @@ DEFAULT_ANCHOR_SANITY_PX = 5.0  # session stats beyond this from the pair -> fal
 DEFAULT_SPIKE_THRESHOLD = 0.15  # of the (max-min) gripper range, user-tuned
 DEFAULT_SPIKE_MAX_LEN = 2       # spikes longer than this are kept (real data)
 DEFAULT_SPIKE_CONTEXT = 3       # valid samples inspected on each side
+DECODING_HAMMING_MAX = 0        # v3 decoding gate: reject error-corrected decodes
+
+# Per-episode detection stats (gripper_detection_stats.json), v3 schema.
+STATS_FIELD_DOCS = {
+    "n_frames": "总帧数（等于 color 帧数）",
+    "symmetry_center_px": "对称补全所用中心：session 级池化中位数；整 session 无可用中点时才回退本集估计",
+    "n_valid_distances": "进入序列的有效开度样本数（补全判定后、插值前）",
+    "coverage": "n_valid_distances / n_frames",
+    "n_both_tags": "双 tag 均检出且过判据的帧数",
+    "n_sym_filled": "仅单侧检出、经对称约束补全的帧数",
+    "n_frames_preprocessed": "需 CLAHE/直方图均衡才检出的帧数",
+    "gap_lengths_frames": "各缺检洞长度（帧）；>10 帧的洞为 NaN 交 QC",
+}
 
 
 def build_preprocessors():
@@ -86,6 +105,8 @@ def detect_frame_tags(gray, at_detector, left_id, right_id,
                       preprocessors=None):
     """Detect the left/right gripper tags in one frame.
 
+    Legacy full-band path kept for faithful pre-v3 comparisons: NO decoding
+    quality gate here (error-corrected decodes are accepted on purpose).
     Tries plain grayscale first, then each preprocessing variant until both
     tags are valid, accumulating: a tag found by a later attempt fills the
     slot still missing from earlier ones. Returns a dict
@@ -125,6 +146,10 @@ def detect_window_strip(strip, at_detector, tag_id, nominal_diag_distance,
     only ever accepts the left tag's ID, so a tag detected on the wrong side
     cannot enter the series at all. Runs the raw strip first (zero overhead
     on good frames), then the preprocessing chain until the tag is found.
+    Candidates must additionally decode with zero error correction
+    (``hamming <= DECODING_HAMMING_MAX``, v3 decoding quality gate): glare
+    and jaw-highlight misdetections are almost always error-corrected
+    guesses (see experiments/spike_origin/).
     Returns (x_in_strip_or_None, used_preprocess).
     """
     if preprocessors is None:
@@ -134,7 +159,7 @@ def detect_window_strip(strip, at_detector, tag_id, nominal_diag_distance,
         for res in at_detector.detect(img):
             if res.tag_id == tag_id and check_tag_valid(
                     res, nominal_diag_distance=nominal_diag_distance,
-                    threshold=threshold):
+                    threshold=threshold) and res.hamming <= DECODING_HAMMING_MAX:
                 return res
         return None
 
@@ -421,39 +446,38 @@ def finalize_series(detection, min_distance, max_distance, *,
         center, prior_center=prior_center, prior_tol=prior_tol,
         distance_bounds=distance_bounds)
 
-    range_px = max_distance - min_distance
-    spikes = []
-    if range_px > 0 and len(indices) > 2:
-        drop = remove_spikes(indices, values, range_px,
-                             threshold=spike_threshold,
-                             max_len=spike_max_len,
-                             context=spike_context)
-        if drop:
-            spikes = [{"frame": indices[d], "value": values[d]} for d in drop]
-            keep = set(range(len(indices))) - set(drop)
-            indices = [indices[j] for j in sorted(keep)]
-            values = [values[j] for j in sorted(keep)]
-            flags = [flags[j] for j in sorted(keep)]
+    # 尖峰剔除已退役（2026-10-23，v3 schema 起一并移除 stats 键）：误检在检测
+    # 层被窗条+尺寸闸+解码质量闸（hamming==0）+先验筛+行程界结构性排除后，
+    # 序列层去尖峰在全量重跑中零触发。成因分析、旧版复现与全集验证见
+    # experiments/spike_origin/。remove_spikes 函数定义保留作历史参考，不再
+    # 调用；stats 不再输出 spikes_removed 键（v3 schema，无下游依赖）。
+    # range_px = max_distance - min_distance
+    # if range_px > 0 and len(indices) > 2:
+    #     drop = remove_spikes(indices, values, range_px,
+    #                          threshold=spike_threshold,
+    #                          max_len=spike_max_len,
+    #                          context=spike_context)
+    #     if drop:
+    #         spikes = [{"frame": indices[d], "value": values[d]} for d in drop]
+    #         keep = set(range(len(indices))) - set(drop)
+    #         indices = [indices[j] for j in sorted(keep)]
+    #         values = [values[j] for j in sorted(keep)]
+    #         flags = [flags[j] for j in sorted(keep)]
     raw = interpolate_gaps(detection.frame_count, indices, values,
                             mode=interp_mode, max_interp_gap=max_interp_gap)
     if raw is not None and median_filter_fn is not None:
         raw = median_filter_fn(raw)
     stats = {
-        "center_px": center,
-        "valid_samples": len(indices),
+        "n_frames": detection.frame_count,
+        "symmetry_center_px": center,
+        "n_valid_distances": len(indices),
         "coverage": len(indices) / detection.frame_count if detection.frame_count else 0.0,
-        "n_both": flags.count("both"),
-        "n_left_sym": flags.count("left_sym"),
-        "n_right_sym": flags.count("right_sym"),
-        "n_frames_left_only": sum(1 for l in detection.left_xs if l is not None),
-        "n_frames_right_only": sum(1 for r in detection.right_xs if r is not None),
-        "preprocess_frames": detection.preprocess_frames,
-        "spikes_removed": spikes,
-        "interp_mode": interp_mode,
-        "max_interp_gap": max_interp_gap,
-        "gap_lengths": _gap_lengths(detection.frame_count, indices),
+        "n_both_tags": flags.count("both"),
+        "n_sym_filled": flags.count("left_sym") + flags.count("right_sym"),
+        "n_frames_preprocessed": detection.preprocess_frames,
+        "gap_lengths_frames": _gap_lengths(detection.frame_count, indices),
     }
-    return raw, stats
+    return raw, {"field_docs": STATS_FIELD_DOCS, **stats}
 
 
 def find_distances_max_min(distances, threshold=0.05, threshold_num=10):
