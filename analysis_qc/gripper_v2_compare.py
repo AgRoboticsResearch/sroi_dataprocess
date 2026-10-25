@@ -35,16 +35,16 @@ for ep_idx, grp in _df.groupby('episode_index'):
     g = np.array([float(r[-1]) for r in grp['observation.ee']])
     old[ep_idx] = g
 # episode_index -> "<session>/episode_XXX" 映射(按转换顺序)
-_keys = sorted(glob.glob('/home/ss/data/1000_onesb_labpicking/*-png/episode_*/gripper_distances.txt')
-             + glob.glob('/home/ss/data/120_onesb_supplementary/*-png/episode_*/gripper_distances.txt'))
+_keys = sorted(glob.glob('/home/ss/data/one_strawberry_labpicking/*-png/episode_*/gripper_distances.txt')
+             + glob.glob('/home/ss/data/one_strawberry_labpicking/*-png/episode_*/gripper_distances.txt'))
 _key_by_idx = {i: '/'.join(fp.split('/')[-3:-1]) for i, fp in enumerate(_keys)}
 old = {_key_by_idx.get(i, str(i)): g for i, g in old.items()}
 
 # 2) 扫新输出
 rows, nan_eps, spike_eps = [], [], []
 new_vals = {}
-for fp in sorted(glob.glob('/home/ss/data/1000_onesb_labpicking/*-png/episode_*/gripper_distances.txt')
-               + glob.glob('/home/ss/data/120_onesb_supplementary/*-png/episode_*/gripper_distances.txt')):
+for fp in sorted(glob.glob('/home/ss/data/one_strawberry_labpicking/*-png/episode_*/gripper_distances.txt')
+               + glob.glob('/home/ss/data/one_strawberry_labpicking/*-png/episode_*/gripper_distances.txt')):
     key = '/'.join(fp.split('/')[-3:-1])
     g = np.loadtxt(fp)
     new_vals[key] = g
@@ -86,8 +86,8 @@ for key in focus:
 
 # 5) 新图全部(平铺)
 import shutil
-for fp in sorted(glob.glob('/home/ss/data/1000_onesb_labpicking/*-png/episode_*/gripper_distances.jpg')
-               + glob.glob('/home/ss/data/120_onesb_supplementary/*-png/episode_*/gripper_distances.jpg')):
+for fp in sorted(glob.glob('/home/ss/data/one_strawberry_labpicking/*-png/episode_*/gripper_distances.jpg')
+               + glob.glob('/home/ss/data/one_strawberry_labpicking/*-png/episode_*/gripper_distances.jpg')):
     key = '_'.join(fp.split('/')[-3:-1]).replace('-png', '')
     shutil.copy(fp, f"{OUT}/新图全部/{key}.jpg")
 

@@ -9,7 +9,7 @@
 #
 # Usage:
 #   bash batches/convert_batch.sh <data-root> <repo_id> [out-root] [extra args...]
-#   bash batches/convert_batch.sh ~/data/1000_onesb_labpicking sroi/lab_picking \
+#   bash batches/convert_batch.sh ~/data/one_strawberry_labpicking sroi/lab_picking \
 #            ~/data/lerobot_out --qc-csv /path/qc.csv
 #   Add --no-qc to convert everything without a QC filter (not recommended).
 

@@ -98,7 +98,7 @@ Outputs are written under `<session>-schemes/_compare/`.
 
 - Projection extrinsics are loaded from `configs/camera_gripper_extrinsics_sroi_v2_d405.json`.
   Use a separate config and verify the projected green point for every different rig.
-- The default data root is `/home/ss/data/1000_onesb_labpicking`. Override it with
+- The default data root is `/home/ss/data/one_strawberry_labpicking`. Override it with
   `MASK_DATA`, or pass a data-root argument to `aggregate_schemes.py`.
 - `run_orb_scheme.py` defaults to `~/code/ORB_SLAM3`. Override it with
   `ORB_SLAM3_DIR` or `--orbslam-dir`.

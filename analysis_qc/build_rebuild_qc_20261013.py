@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 MD_LIST = Path('/home/ss/data/QC工作汇总_20261013/轨迹QC/剔除清单_EXCLUDED.md')
-ROOTS = [Path('/home/ss/data/1000_onesb_labpicking'), Path('/home/ss/data/120_onesb_supplementary')]
+ROOTS = [Path('/home/ss/data/one_strawberry_labpicking'), Path('/home/ss/data/120_onesb_supplementary')]
 OUT = Path('/home/ss/data/rebuild_qc_20261013/qc.csv')
 TAIL_THRESHOLD = 0.25
 

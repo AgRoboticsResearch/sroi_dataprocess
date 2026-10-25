@@ -4,7 +4,7 @@
 # Usage: build_session_schemes.sh <session-basename>  Example: 20260709_144719
 set -e
 B="$1"
-BASE="${MASK_DATA:-/home/ss/data/1000_onesb_labpicking}"
+BASE="${MASK_DATA:-/home/ss/data/one_strawberry_labpicking}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 VIZ="$(cd "$(dirname "$0")" && pwd)"
 MP4="$BASE/$B-mp4"; PNG="$BASE/$B-png"; MASK="$BASE/$B-png-mask292"; SCH="$BASE/$B-schemes"

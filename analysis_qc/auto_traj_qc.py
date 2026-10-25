@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 
 EXTRINSICS = Path("/home/ss/sroi_dataprocess/configs/camera_gripper_extrinsics_sroi_v2_d405.json")
-ROOTS = [Path("/home/ss/data/1000_onesb_labpicking"), Path("/home/ss/data/120_onesb_supplementary")]
+ROOTS = [Path("/home/ss/data/one_strawberry_labpicking"), Path("/home/ss/data/120_onesb_supplementary")]
 MD_LIST = Path("/home/ss/data/QC工作汇总_20261013/轨迹QC/剔除清单_EXCLUDED.md")
 OUT_CSV = Path("/home/ss/data/rebuild_qc_20261013/auto_traj_qc.csv")
 OUT_OVERLAY = Path("/home/ss/data/rebuild_qc_20261013/auto_qc_overlay")
@@ -132,7 +132,7 @@ def main():
     if mode == "tune":
         for key in sys.argv[2:]:
             sess, epn = key.split("/")
-            ep = Path(ROOTS[0].parent) / "1000_onesb_labpicking" / sess / epn
+            ep = Path(ROOTS[0].parent) / "one_strawberry_labpicking" / sess / epn
             if not ep.exists():
                 ep = Path(ROOTS[1].parent) / "120_onesb_supplementary" / sess / epn
             overlay(ep, tip_in_opt, OUT_OVERLAY / f"{sess}_{epn}.png")

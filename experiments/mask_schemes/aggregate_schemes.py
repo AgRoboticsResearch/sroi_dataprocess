@@ -9,7 +9,7 @@ import numpy as np
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("data_root", nargs="?", type=Path,
-                    default=Path(os.environ.get("MASK_DATA", "/home/ss/data/1000_onesb_labpicking")))
+                    default=Path(os.environ.get("MASK_DATA", "/home/ss/data/one_strawberry_labpicking")))
 args = parser.parse_args()
 base = args.data_root.resolve()
 csvs = sorted(glob.glob(str(base / "*-schemes/_compare/deviation.csv")))
