@@ -41,12 +41,16 @@ GRIPPER_NORMALIZATION_MANIFEST = "gripper_normalization.json"
 #                 fails the angle test and stays trimmed; genuine (possibly
 #                 curvy) approach keeps its acceleration ramp.
 # Episode that never reaches the gate is kept whole; the trim is capped at
-# `max_fraction` of the episode as a safety net.
+# `max_fraction` of the episode as a safety net. A short quasi-static lead-in
+# is preserved on purpose (TRIM_KEEP_EXTRA_FRAMES before the found start):
+# recovery-style episodes naturally open with a brief pause, and a few still
+# frames cost nothing at execution time.
 TRIM_GATE_MM = 10.0        # anchor: net displacement from the first frame
 TRIM_STEP_MIN_MM = 0.8     # qualifying back-walk step magnitude
 TRIM_ANGLE_MAX_DEG = 10.0  # max angle between adjacent back-walk steps
 TRIM_SEED_WINDOW = 15      # frames after the anchor to look for a seed step
 TRIM_MAX_FRACTION = 0.3    # safety cap: never trim more than this fraction
+TRIM_KEEP_EXTRA_FRAMES = 3  # keep a brief quasi-static lead-in before the found start
 
 
 def find_start_trim_count(
@@ -61,6 +65,8 @@ def find_start_trim_count(
 
     Returns 0 when the episode is too short, never leaves the start vicinity,
     or no seed step exists after the anchor (conservative: keep everything).
+    The count is reduced by TRIM_KEEP_EXTRA_FRAMES (floored at 0) so the kept
+    head includes a brief quasi-static lead-in.
     """
     n = len(positions)
     if n < 8:
@@ -89,7 +95,7 @@ def find_start_trim_count(
         if np.degrees(np.arccos(np.clip(cosang, -1.0, 1.0))) > angle_max_deg:
             break
         j -= 1
-    return min(j, int(max_fraction * n))
+    return max(0, min(j, int(max_fraction * n)) - TRIM_KEEP_EXTRA_FRAMES)
 
 
 def _copy_gripper_normalization(
@@ -384,6 +390,21 @@ def create_lerobot_dataset(
             "shape": (h, w, 3),
             "names": ["height", "width", "channels"],
         },
+        # 当前帧 EE 绝对位姿+夹爪(UMI 口径 state[t]=action[t-1] 的精确化:
+        # 头样本的基准/速度参考不再依赖 padding 近似)。训练侧派生步优先消费。
+        "observation.ee": {
+            "dtype": "float32",
+            "names": [
+                "ee.x",
+                "ee.y",
+                "ee.z",
+                "ee.wx",
+                "ee.wy",
+                "ee.wz",
+                "ee.gripper_pos",
+            ],
+            "shape": (7,),
+        },
         "action": {
             "dtype": "float32",
             "names": [
@@ -543,6 +564,17 @@ def create_lerobot_dataset(
         for i in range(min_length):
             image = images[i]
 
+            # 当前帧 EE 绝对位姿+夹爪(与图像/action 同帧对齐)。
+            observation_ee = np.array([
+                positions[i, 0],  # x
+                positions[i, 1],  # y
+                positions[i, 2],  # z
+                rotvecs[i, 0],    # wx
+                rotvecs[i, 1],    # wy
+                rotvecs[i, 2],    # wz
+                gripper_distances[i],  # gripper_pos
+            ], dtype=np.float32)
+
             # Action (next state)
             # For the last frame, we repeat the last state
             next_idx = min(i + 1, min_length - 1)
@@ -559,6 +591,7 @@ def create_lerobot_dataset(
             # Build frame
             frame = {
                 "observation.images.camera": image,
+                "observation.ee": observation_ee,
                 "action": action,
                 "task": single_task,
             }
