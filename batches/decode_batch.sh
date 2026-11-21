@@ -20,9 +20,14 @@
 #   ./decode_batch.sh /data/20260728-occluded-cases/20260728_200203-mp4
 #
 # Idempotent: sessions whose <png_root>/<ts>-png target already has decoded frames
-# are skipped. Raw *-mp4 folders are never modified. Downstream steps (ORB-SLAM3,
-# transform_trajectory.py, gripper_estimation_april_tag.py, visualization/qc.py)
-# then run against <png_root>.
+# are skipped. Downstream steps (ORB-SLAM3, transform_trajectory.py,
+# gripper_estimation_april_tag.py, visualization/qc.py) then run against <png_root>.
+#
+# Power-loss cleanup: episodes left incomplete by a Pi power loss are deleted
+# from the raw session (reasons in the per-session decode log) and a missing
+# meta.json is rebuilt in the recorder's exact format, so the session looks
+# like a normally-finalized one. Complete sessions — and every normally
+# recorded episode — are left untouched.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -185,9 +190,25 @@ decode_one() {
         record_result "error"
         return
     fi
+    # Drop derived episode dirs whose raw source no longer exists (leftovers
+    # deleted by the power-loss cleanup). Must run while the stage still
+    # exists so "$staged_target" stays a valid comparison base.
+    for live_ep in "$target"/episode_*/; do
+        [ -d "$live_ep" ] || continue
+        if [ ! -d "$session/$(basename "$live_ep")" ]; then
+            rm -rf -- "$live_ep"
+            echo "  dropped derived episode without raw source: $(basename "$live_ep")"
+        fi
+    done
     rm -rf -- "$stage"
     if session_complete "$session" "$target"; then
-        echo "  done: $name"
+        local deleted
+        deleted="$(grep -c '^  deleted episode_' "$log" 2>/dev/null || true)"
+        if [ "$deleted" -gt 0 ] 2>/dev/null; then
+            echo "  done: $name (deleted=$deleted raw episode(s), see log)"
+        else
+            echo "  done: $name"
+        fi
         record_result "ok"
     else
         echo "  ERROR: incomplete decode for $name (log: $log)"
