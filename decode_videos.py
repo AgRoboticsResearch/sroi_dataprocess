@@ -21,8 +21,11 @@ Power-loss cleanup (--recursive, session flow):
       metadata) or that fail at decode time (truncated/corrupt mp4, decoded
       frame count != frame_count) are deleted from the raw session, with
       the reason logged;
-    - a missing or unparseable meta.json is rebuilt from the surviving
-      episodes in the recorder's exact format.
+    - meta.json is then reconciled with the episodes that actually exist:
+      rebuilt in the recorder's exact format when it is missing, unparseable,
+      or stale (episode count / total_frames disagree — e.g. episodes were
+      deleted by hand after finalize). A consistent meta.json is left
+      byte-identical.
   If no episode survives, nothing is deleted and no meta.json is written
   (exit 1) so the session stays intact for human inspection. Downstream
   sees a session indistinguishable from a normally-finalized one.
@@ -225,6 +228,34 @@ def get_output_dir(episode_dir: Path, output_root: Path = None) -> Path:
     return get_session_output_dir(episode_dir.parent, output_root) / episode_dir.name
 
 
+def episodes_totals(episode_dirs):
+    """(episode count, total frames) as the recorder's meta counts them."""
+    total_frames = 0
+    for episode_dir in episode_dirs:
+        ts_data = json.load(open(episode_dir / "timestamps.json"))
+        total_frames += ts_data["frame_count"]
+    return len(episode_dirs), total_frames
+
+
+def stale_meta_reason(meta_path: Path, episode_dirs):
+    """Why the recorded meta.json no longer matches the episodes on disk,
+    or None if it is consistent. Only exactly recomputable fields are
+    compared (episode count, total frames) — size/duration accounting
+    differed across recorder versions and must not trigger rewrites."""
+    try:
+        meta = json.load(open(meta_path))
+    except (json.JSONDecodeError, ValueError) as e:
+        return f"unparseable ({e})"
+    episodes, total_frames = episodes_totals(episode_dirs)
+    if meta.get("episodes") != episodes:
+        return (f"episodes={meta.get('episodes')} but {episodes} on disk "
+                f"(deleted by hand?)")
+    if meta.get("total_frames") != total_frames:
+        return (f"total_frames={meta.get('total_frames')} but {total_frames} "
+                f"on disk")
+    return None
+
+
 def rebuild_meta_json(session_dir: Path, episode_dirs):
     """Rebuild the session meta.json the recorder would have written at
     finalize, from the surviving episodes. Field set, key order, rounding
@@ -297,17 +328,18 @@ def process_session(session_dir: Path, output_root: Path = None) -> int:
         shutil.rmtree(ep_dir)
         print(f"  deleted {ep_dir.name}: {reason} ({detail})")
 
-    # 5) Backfill the session finalize: meta.json in the recorder's format.
+    # 5) Reconcile the session finalize: meta.json must match the episodes
+    #    that actually exist (power loss, or episodes deleted by hand).
     meta_path = session_dir / "meta.json"
-    if not meta_path.exists():
-        rebuild_meta_json(session_dir, decoded)
-        print(f"  rebuilt meta.json ({len(decoded)} episodes)")
+    if meta_path.exists():
+        reason = stale_meta_reason(meta_path, decoded)
     else:
-        try:
-            json.load(open(meta_path))
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"  meta.json unparseable ({e}), rebuilding")
-            rebuild_meta_json(session_dir, decoded)
+        reason = "missing (session finalize never ran)"
+    if reason is not None:
+        rebuild_meta_json(session_dir, decoded)
+        print(f"  rebuilt meta.json: {reason}; now {len(decoded)} episodes")
+    else:
+        print(f"  meta.json consistent ({len(decoded)} episodes), left as is")
 
     return 0
 
